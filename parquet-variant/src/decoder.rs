@@ -19,8 +19,10 @@ use crate::utils::{
     array_from_slice, overflow_error, slice_from_slice_at_offset, string_from_slice,
 };
 
+use crate::temporal;
 use arrow_schema::ArrowError;
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use jiff::Timestamp;
+use jiff::civil::{Date, DateTime, Time};
 use uuid::Uuid;
 
 /// The basic type of a [`Variant`] value, encoded in the first two bits of the
@@ -276,70 +278,33 @@ pub(crate) fn decode_double(data: &[u8]) -> Result<f64, ArrowError> {
 }
 
 /// Decodes a Date from the value section of a variant.
-pub(crate) fn decode_date(data: &[u8]) -> Result<NaiveDate, ArrowError> {
-    let days_since_epoch = i32::from_le_bytes(array_from_slice(data, 0)?);
-    DateTime::UNIX_EPOCH
-        .checked_add_signed(Duration::days(i64::from(days_since_epoch)))
-        .map(|value| value.date_naive())
-        .ok_or_else(|| {
-            ArrowError::CastError(format!(
-                "Could not cast `{days_since_epoch}` days into a NaiveDate"
-            ))
-        })
+pub(crate) fn decode_date(data: &[u8]) -> Result<Date, ArrowError> {
+    temporal::date_from_days(i32::from_le_bytes(array_from_slice(data, 0)?))
 }
 
 /// Decodes a TimestampMicros from the value section of a variant.
-pub(crate) fn decode_timestamp_micros(data: &[u8]) -> Result<DateTime<Utc>, ArrowError> {
-    let micros_since_epoch = i64::from_le_bytes(array_from_slice(data, 0)?);
-    DateTime::from_timestamp_micros(micros_since_epoch).ok_or_else(|| {
-        ArrowError::CastError(format!(
-            "Could not cast `{micros_since_epoch}` microseconds into a DateTime<Utc>"
-        ))
-    })
+pub(crate) fn decode_timestamp_micros(data: &[u8]) -> Result<Timestamp, ArrowError> {
+    temporal::timestamp_from_micros(i64::from_le_bytes(array_from_slice(data, 0)?))
 }
 
 /// Decodes a TimestampNtzMicros from the value section of a variant.
-pub(crate) fn decode_timestampntz_micros(data: &[u8]) -> Result<NaiveDateTime, ArrowError> {
-    let micros_since_epoch = i64::from_le_bytes(array_from_slice(data, 0)?);
-    DateTime::from_timestamp_micros(micros_since_epoch)
-        .ok_or_else(|| {
-            ArrowError::CastError(format!(
-                "Could not cast `{micros_since_epoch}` microseconds into a NaiveDateTime"
-            ))
-        })
-        .map(|v| v.naive_utc())
+pub(crate) fn decode_timestampntz_micros(data: &[u8]) -> Result<DateTime, ArrowError> {
+    temporal::datetime_from_micros(i64::from_le_bytes(array_from_slice(data, 0)?))
 }
 
-pub(crate) fn decode_time_ntz(data: &[u8]) -> Result<NaiveTime, ArrowError> {
-    let micros_since_epoch = u64::from_le_bytes(array_from_slice(data, 0)?);
-
-    let case_error = ArrowError::CastError(format!(
-        "Could not cast {micros_since_epoch} microseconds into a NaiveTime"
-    ));
-
-    if micros_since_epoch >= 86_400_000_000 {
-        return Err(case_error);
-    }
-
-    let nanos_since_midnight = micros_since_epoch * 1_000;
-    NaiveTime::from_num_seconds_from_midnight_opt(
-        (nanos_since_midnight / 1_000_000_000) as u32,
-        (nanos_since_midnight % 1_000_000_000) as u32,
-    )
-    .ok_or(case_error)
+/// Decodes a Time from the value section of a variant.
+pub(crate) fn decode_time_ntz(data: &[u8]) -> Result<Time, ArrowError> {
+    temporal::time_from_micros(u64::from_le_bytes(array_from_slice(data, 0)?))
 }
 
 /// Decodes a TimestampNanos from the value section of a variant.
-pub(crate) fn decode_timestamp_nanos(data: &[u8]) -> Result<DateTime<Utc>, ArrowError> {
-    let nanos_since_epoch = i64::from_le_bytes(array_from_slice(data, 0)?);
-
-    // DateTime::from_timestamp_nanos would never fail
-    Ok(DateTime::from_timestamp_nanos(nanos_since_epoch))
+pub(crate) fn decode_timestamp_nanos(data: &[u8]) -> Result<Timestamp, ArrowError> {
+    temporal::timestamp_from_nanos(i64::from_le_bytes(array_from_slice(data, 0)?))
 }
 
 /// Decodes a TimestampNtzNanos from the value section of a variant.
-pub(crate) fn decode_timestampntz_nanos(data: &[u8]) -> Result<NaiveDateTime, ArrowError> {
-    decode_timestamp_nanos(data).map(|v| v.naive_utc())
+pub(crate) fn decode_timestampntz_nanos(data: &[u8]) -> Result<DateTime, ArrowError> {
+    temporal::datetime_from_nanos(i64::from_le_bytes(array_from_slice(data, 0)?))
 }
 
 /// Decodes a UUID from the value section of a variant.
@@ -465,20 +430,91 @@ mod tests {
 
     mod datetime {
         use super::*;
+        use jiff::civil::date;
+        use jiff::tz::Offset;
+
+        fn utc(dt: DateTime) -> Timestamp {
+            Offset::UTC.to_timestamp(dt).unwrap()
+        }
 
         test_decoder_bounds!(
             test_date,
             [0xe2, 0x4e, 0x0, 0x0],
             decode_date,
-            NaiveDate::from_ymd_opt(2025, 4, 16).unwrap()
+            date(2025, 4, 16)
         );
 
         #[test]
         fn test_date_out_of_range() {
-            // A day count that overflows chrono's supported date range must error, not panic
+            // A day count that overflows the supported date range must error, not panic
             for days in [i32::MAX, i32::MIN] {
                 let result = decode_date(&days.to_le_bytes());
                 assert!(matches!(result, Err(ArrowError::CastError(_))));
+            }
+        }
+
+        /// jiff's date range is -9999-01-01..=9999-12-31 (chrono's was +-262143
+        /// years). The edges decode; one day past either edge is an explicit error.
+        #[test]
+        fn test_date_range_edges() {
+            let min_days: i32 = -4_371_587;
+            let max_days: i32 = 2_932_896;
+            assert_eq!(decode_date(&min_days.to_le_bytes()).unwrap(), Date::MIN);
+            assert_eq!(decode_date(&max_days.to_le_bytes()).unwrap(), Date::MAX);
+            for days in [min_days - 1, max_days + 1] {
+                let result = decode_date(&days.to_le_bytes());
+                assert!(matches!(result, Err(ArrowError::CastError(_))), "{days}");
+            }
+        }
+
+        /// The UTC timestamp range is jiff's `Timestamp::MIN..=Timestamp::MAX`
+        /// (-009999-01-02T01:59:59Z..=9999-12-30T22:00:00.999999Z at microsecond
+        /// precision); the NTZ range is the full civil range.
+        #[test]
+        fn test_timestamp_micros_range_edges() {
+            let min = Timestamp::MIN.as_microsecond();
+            let max = Timestamp::MAX.as_microsecond();
+            assert_eq!(
+                decode_timestamp_micros(&min.to_le_bytes()).unwrap(),
+                Timestamp::MIN
+            );
+            assert_eq!(
+                decode_timestamp_micros(&max.to_le_bytes())
+                    .unwrap()
+                    .as_microsecond(),
+                max
+            );
+            for micros in [min - 1, max + 1, i64::MIN, i64::MAX] {
+                let result = decode_timestamp_micros(&micros.to_le_bytes());
+                assert!(matches!(result, Err(ArrowError::CastError(_))), "{micros}");
+            }
+
+            let epoch = date(1970, 1, 1).at(0, 0, 0, 0);
+            let ntz_max_value = date(9999, 12, 31).at(23, 59, 59, 999_999_000);
+            let ntz_min = i64::try_from(DateTime::MIN.duration_since(epoch).as_micros()).unwrap();
+            let ntz_max = i64::try_from(ntz_max_value.duration_since(epoch).as_micros()).unwrap();
+            assert_eq!(
+                decode_timestampntz_micros(&ntz_min.to_le_bytes()).unwrap(),
+                DateTime::MIN
+            );
+            assert_eq!(
+                decode_timestampntz_micros(&ntz_max.to_le_bytes()).unwrap(),
+                ntz_max_value
+            );
+            for micros in [ntz_min - 1, ntz_max + 1, i64::MIN, i64::MAX] {
+                let result = decode_timestampntz_micros(&micros.to_le_bytes());
+                assert!(matches!(result, Err(ArrowError::CastError(_))), "{micros}");
+            }
+        }
+
+        /// Every i64 nanosecond count is representable, as it was with chrono.
+        #[test]
+        fn test_timestamp_nanos_full_i64_range() {
+            for nanos in [i64::MIN, -1, 0, 1, i64::MAX] {
+                let ts = decode_timestamp_nanos(&nanos.to_le_bytes()).unwrap();
+                assert_eq!(ts.as_nanosecond(), i128::from(nanos));
+                let dt = decode_timestampntz_nanos(&nanos.to_le_bytes()).unwrap();
+                assert_eq!(Offset::UTC.to_timestamp(dt).unwrap(), ts);
             }
         }
 
@@ -486,63 +522,42 @@ mod tests {
             test_timestamp_micros,
             [0xe0, 0x52, 0x97, 0xdd, 0xe7, 0x32, 0x06, 0x00],
             decode_timestamp_micros,
-            NaiveDate::from_ymd_opt(2025, 4, 16)
-                .unwrap()
-                .and_hms_milli_opt(16, 34, 56, 780)
-                .unwrap()
-                .and_utc()
+            utc(date(2025, 4, 16).at(16, 34, 56, 780_000_000))
         );
 
         test_decoder_bounds!(
             test_timestampntz_micros,
             [0xe0, 0x52, 0x97, 0xdd, 0xe7, 0x32, 0x06, 0x00],
             decode_timestampntz_micros,
-            NaiveDate::from_ymd_opt(2025, 4, 16)
-                .unwrap()
-                .and_hms_milli_opt(16, 34, 56, 780)
-                .unwrap()
+            date(2025, 4, 16).at(16, 34, 56, 780_000_000)
         );
 
         test_decoder_bounds!(
             test_timestamp_nanos,
             [0x15, 0x41, 0xa2, 0x5a, 0x36, 0xa2, 0x5b, 0x18],
             decode_timestamp_nanos,
-            NaiveDate::from_ymd_opt(2025, 8, 14)
-                .unwrap()
-                .and_hms_nano_opt(12, 33, 54, 123456789)
-                .unwrap()
-                .and_utc()
+            utc(date(2025, 8, 14).at(12, 33, 54, 123456789))
         );
 
         test_decoder_bounds!(
             test_timestamp_nanos_before_epoch,
             [0x15, 0x41, 0x52, 0xd4, 0x94, 0xe5, 0xad, 0xfa],
             decode_timestamp_nanos,
-            NaiveDate::from_ymd_opt(1957, 11, 7)
-                .unwrap()
-                .and_hms_nano_opt(12, 33, 54, 123456789)
-                .unwrap()
-                .and_utc()
+            utc(date(1957, 11, 7).at(12, 33, 54, 123456789))
         );
 
         test_decoder_bounds!(
             test_timestampntz_nanos,
             [0x15, 0x41, 0xa2, 0x5a, 0x36, 0xa2, 0x5b, 0x18],
             decode_timestampntz_nanos,
-            NaiveDate::from_ymd_opt(2025, 8, 14)
-                .unwrap()
-                .and_hms_nano_opt(12, 33, 54, 123456789)
-                .unwrap()
+            date(2025, 8, 14).at(12, 33, 54, 123456789)
         );
 
         test_decoder_bounds!(
             test_timestampntz_nanos_before_epoch,
             [0x15, 0x41, 0x52, 0xd4, 0x94, 0xe5, 0xad, 0xfa],
             decode_timestampntz_nanos,
-            NaiveDate::from_ymd_opt(1957, 11, 7)
-                .unwrap()
-                .and_hms_nano_opt(12, 33, 54, 123456789)
-                .unwrap()
+            date(1957, 11, 7).at(12, 33, 54, 123456789)
         );
     }
 
@@ -563,7 +578,8 @@ mod tests {
             test_timentz,
             [0x53, 0x1f, 0x8e, 0xdf, 0x2, 0, 0, 0],
             decode_time_ntz,
-            NaiveTime::from_num_seconds_from_midnight_opt(12340, 567_891_000).unwrap()
+            // 12340.567891 s after midnight
+            Time::constant(3, 25, 40, 567_891_000)
         );
 
         #[test]
@@ -571,6 +587,17 @@ mod tests {
             let invalid_second = u64::MAX;
             let data = invalid_second.to_le_bytes();
             let result = decode_time_ntz(&data);
+            assert!(matches!(result, Err(ArrowError::CastError(_))));
+        }
+
+        #[test]
+        fn test_decode_time_ntz_day_boundary() {
+            let last = 86_400_000_000u64 - 1;
+            assert_eq!(
+                decode_time_ntz(&last.to_le_bytes()).unwrap(),
+                Time::constant(23, 59, 59, 999_999_000)
+            );
+            let result = decode_time_ntz(&(last + 1).to_le_bytes());
             assert!(matches!(result, Err(ArrowError::CastError(_))));
         }
     }

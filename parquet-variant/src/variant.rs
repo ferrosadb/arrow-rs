@@ -31,8 +31,10 @@ use crate::path::{VariantPath, VariantPathElement};
 use crate::utils::{first_byte_from_slice, slice_from_slice};
 use std::ops::Deref;
 
+use crate::temporal::{DateDebug, DateTimeDebug, TimeDebug, TimestampDebug};
 use arrow_schema::ArrowError;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+use jiff::Timestamp;
+use jiff::civil::{Date, DateTime, Time};
 
 mod decimal;
 mod list;
@@ -242,15 +244,15 @@ pub enum Variant<'m, 'v> {
     /// Primitive (type_id=1): INT(64, SIGNED)
     Int64(i64),
     /// Primitive (type_id=1): DATE
-    Date(NaiveDate),
+    Date(Date),
     /// Primitive (type_id=1): TIMESTAMP(isAdjustedToUTC=true, MICROS)
-    TimestampMicros(DateTime<Utc>),
+    TimestampMicros(Timestamp),
     /// Primitive (type_id=1): TIMESTAMP(isAdjustedToUTC=false, MICROS)
-    TimestampNtzMicros(NaiveDateTime),
+    TimestampNtzMicros(DateTime),
     /// Primitive (type_id=1): TIMESTAMP(isAdjustedToUTC=true, NANOS)
-    TimestampNanos(DateTime<Utc>),
+    TimestampNanos(Timestamp),
     /// Primitive (type_id=1): TIMESTAMP(isAdjustedToUTC=false, NANOS)
-    TimestampNtzNanos(NaiveDateTime),
+    TimestampNtzNanos(DateTime),
     /// Primitive (type_id=1): DECIMAL(precision, scale) 32-bits
     Decimal4(VariantDecimal4),
     /// Primitive (type_id=1): DECIMAL(precision, scale) 64-bits
@@ -271,7 +273,7 @@ pub enum Variant<'m, 'v> {
     /// Primitive (type_id=1): STRING
     String(&'v str),
     /// Primitive (type_id=1): TIME(isAdjustedToUTC=false, MICROS)
-    Time(NaiveTime),
+    Time(Time),
     /// Primitive (type_id=1): UUID
     Uuid(Uuid),
     /// Short String (type_id=2): STRING
@@ -548,19 +550,19 @@ impl<'m, 'v> Variant<'m, 'v> {
         }
     }
 
-    /// Converts this variant to a `NaiveDate` if possible.
+    /// Converts this variant to a [`jiff::civil::Date`] if possible.
     ///
-    /// Returns `Some(NaiveDate)` for date variants,
+    /// Returns `Some(Date)` for date variants,
     /// `None` for non-date variants.
     ///
     /// # Examples
     ///
     /// ```
     /// use parquet_variant::Variant;
-    /// use chrono::NaiveDate;
+    /// use jiff::civil::date;
     ///
-    /// // you can extract a NaiveDate from a date variant
-    /// let date = NaiveDate::from_ymd_opt(2025, 4, 12).unwrap();
+    /// // you can extract a Date from a date variant
+    /// let date = date(2025, 4, 12);
     /// let v1 = Variant::from(date);
     /// assert_eq!(v1.as_naive_date(), Some(date));
     ///
@@ -568,7 +570,7 @@ impl<'m, 'v> Variant<'m, 'v> {
     /// let v2 = Variant::from("hello!");
     /// assert_eq!(v2.as_naive_date(), None);
     /// ```
-    pub fn as_naive_date(&self) -> Option<NaiveDate> {
+    pub fn as_naive_date(&self) -> Option<Date> {
         if let Variant::Date(d) = self {
             Some(*d)
         } else {
@@ -576,42 +578,37 @@ impl<'m, 'v> Variant<'m, 'v> {
         }
     }
 
-    /// Converts this variant to a `DateTime<Utc>` if possible.
+    /// Converts this variant to a [`jiff::Timestamp`] (a UTC instant) if possible.
     ///
-    /// Returns `Some(DateTime<Utc>)` for timestamp(micro&nano) variants if fits in the range,
+    /// Returns `Some(Timestamp)` for timestamp(micro&nano) variants if fits in the range,
     /// `None` for other variants or the value can't fit in the micro second range.
     ///
     /// # Examples
     ///
     /// ```
     /// use parquet_variant::Variant;
-    /// use chrono::NaiveDate;
+    /// use jiff::civil::date;
+    /// use jiff::tz::Offset;
     ///
-    /// // you can extract a DateTime<Utc> from a UTC-adjusted variant
-    /// let datetime = NaiveDate::from_ymd_opt(2025, 4, 16)
-    ///     .unwrap()
-    ///     .and_hms_milli_opt(12, 34, 56, 780)
-    ///     .unwrap()
-    ///     .and_utc();
+    /// // you can extract a Timestamp from a UTC-adjusted variant
+    /// let datetime = Offset::UTC
+    ///     .to_timestamp(date(2025, 4, 16).at(12, 34, 56, 780_000_000))
+    ///     .unwrap();
     /// let v1 = Variant::from(datetime);
     /// assert_eq!(v1.as_timestamp_micros(), Some(datetime));
     ///
     /// // or from a timestamp nano variant that can fit into micro second range.
-    /// let datetime_nanos = NaiveDate::from_ymd_opt(2026, 7, 15)
-    /// .unwrap()
-    /// .and_hms_nano_opt(12, 34, 56, 123456000)
-    /// .unwrap()
-    /// .and_utc();
+    /// let datetime_nanos = Offset::UTC
+    ///     .to_timestamp(date(2026, 7, 15).at(12, 34, 56, 123456000))
+    ///     .unwrap();
     /// // construct the variant directly, because variant::from will treat this into a timestamp micro variant
     /// let v2 = Variant::TimestampNanos(datetime_nanos);
     /// assert_eq!(v2.as_timestamp_micros(), Some(datetime_nanos));
     ///
     /// // but not for a non-microsecond-aligned nanosecond variant
-    /// let datetime_nanos = NaiveDate::from_ymd_opt(2025, 8, 14)
-    ///     .unwrap()
-    ///     .and_hms_nano_opt(12, 33, 54, 123456789)
-    ///     .unwrap()
-    ///     .and_utc();
+    /// let datetime_nanos = Offset::UTC
+    ///     .to_timestamp(date(2025, 8, 14).at(12, 33, 54, 123456789))
+    ///     .unwrap();
     /// let v3 = Variant::from(datetime_nanos);
     /// assert_eq!(v3.as_timestamp_micros(), None);
     ///
@@ -619,47 +616,39 @@ impl<'m, 'v> Variant<'m, 'v> {
     /// let v4 = Variant::from("hello");
     /// assert_eq!(v4.as_timestamp_micros(), None);
     /// ```
-    pub fn as_timestamp_micros(&self) -> Option<DateTime<Utc>> {
+    pub fn as_timestamp_micros(&self) -> Option<Timestamp> {
         match *self {
             Variant::TimestampMicros(d) => Some(d),
-            Variant::TimestampNanos(d) if d.nanosecond() % 1_000 == 0 => Some(d),
+            // subsec_nanosecond is negative before the epoch; `% 1_000 == 0` holds either way
+            Variant::TimestampNanos(d) if d.subsec_nanosecond() % 1_000 == 0 => Some(d),
             _ => None,
         }
     }
 
-    /// Converts this variant to a `NaiveDateTime` if possible.
+    /// Converts this variant to a [`jiff::civil::DateTime`] if possible.
     ///
-    /// Returns `Some(NaiveDateTime)` for [`Variant::TimestampNtzMicros`] variants,
+    /// Returns `Some(DateTime)` for [`Variant::TimestampNtzMicros`] variants,
     /// `None` for other variants.
     ///
     /// # Examples
     ///
     /// ```
     /// use parquet_variant::Variant;
-    /// use chrono::NaiveDate;
+    /// use jiff::civil::date;
     ///
-    /// // you can extract a NaiveDateTime from a non-UTC-adjusted variant
-    /// let datetime = NaiveDate::from_ymd_opt(2025, 4, 16)
-    ///     .unwrap()
-    ///     .and_hms_milli_opt(12, 34, 56, 780)
-    ///     .unwrap();
+    /// // you can extract a DateTime from a non-UTC-adjusted variant
+    /// let datetime = date(2025, 4, 16).at(12, 34, 56, 780_000_000);
     /// let v1 = Variant::from(datetime);
     /// assert_eq!(v1.as_timestamp_ntz_micros(), Some(datetime));
     ///
     /// // or from a non-UTC-adjusted timestamp nano variant that can fit into microsecond range
-    /// let datetime_nanos = NaiveDate::from_ymd_opt(2026, 7, 15)
-    /// .unwrap()
-    /// .and_hms_nano_opt(12, 34, 56, 123456000)
-    /// .unwrap();
+    /// let datetime_nanos = date(2026, 7, 15).at(12, 34, 56, 123456000);
     /// // construct the variant directly, because variant::from will treat this into a timestamp variant
     /// let v2 = Variant::TimestampNtzNanos(datetime_nanos);
     /// assert_eq!(v2.as_timestamp_ntz_micros(), Some(datetime_nanos));
     ///
     /// // but not for a non-microsecond-aligned nanosecond variant.
-    /// let datetime_nanos = NaiveDate::from_ymd_opt(2025, 8, 14)
-    ///     .unwrap()
-    ///     .and_hms_nano_opt(12, 33, 54, 123456789)
-    ///     .unwrap();
+    /// let datetime_nanos = date(2025, 8, 14).at(12, 33, 54, 123456789);
     /// let v3 = Variant::from(datetime_nanos);
     /// assert_eq!(v3.as_timestamp_ntz_micros(), None);
     ///
@@ -667,40 +656,37 @@ impl<'m, 'v> Variant<'m, 'v> {
     /// let v4 = Variant::from("hello");
     /// assert_eq!(v4.as_timestamp_ntz_micros(), None);
     /// ```
-    pub fn as_timestamp_ntz_micros(&self) -> Option<NaiveDateTime> {
+    pub fn as_timestamp_ntz_micros(&self) -> Option<DateTime> {
         match *self {
             Variant::TimestampNtzMicros(d) => Some(d),
-            Variant::TimestampNtzNanos(d) if d.nanosecond() % 1000 == 0 => Some(d),
+            Variant::TimestampNtzNanos(d) if d.subsec_nanosecond() % 1000 == 0 => Some(d),
             _ => None,
         }
     }
 
-    /// Converts this variant to a `DateTime<Utc>` if possible.
+    /// Converts this variant to a [`jiff::Timestamp`] (a UTC instant) if possible.
     ///
-    /// Returns `Some(DateTime<Utc>)` for timestamp variants,
+    /// Returns `Some(Timestamp)` for timestamp variants,
     /// `None` for other variants.
     ///
     /// # Examples
     ///
     /// ```
     /// use parquet_variant::Variant;
-    /// use chrono::NaiveDate;
+    /// use jiff::civil::date;
+    /// use jiff::tz::Offset;
     ///
-    /// // you can extract a DateTime<Utc> from a UTC-adjusted nanosecond-precision variant
-    /// let datetime = NaiveDate::from_ymd_opt(2025, 4, 16)
-    ///     .unwrap()
-    ///     .and_hms_nano_opt(12, 34, 56, 789123456)
-    ///     .unwrap()
-    ///     .and_utc();
+    /// // you can extract a Timestamp from a UTC-adjusted nanosecond-precision variant
+    /// let datetime = Offset::UTC
+    ///     .to_timestamp(date(2025, 4, 16).at(12, 34, 56, 789123456))
+    ///     .unwrap();
     /// let v1 = Variant::from(datetime);
     /// assert_eq!(v1.as_timestamp_nanos(), Some(datetime));
     ///
     /// // or from UTC-adjusted microsecond-precision variant
-    /// let datetime_micros = NaiveDate::from_ymd_opt(2025, 8, 14)
-    ///     .unwrap()
-    ///     .and_hms_milli_opt(12, 33, 54, 123)
-    ///     .unwrap()
-    ///     .and_utc();
+    /// let datetime_micros = Offset::UTC
+    ///     .to_timestamp(date(2025, 8, 14).at(12, 33, 54, 123_000_000))
+    ///     .unwrap();
     /// // this will convert to `Variant::TimestampMicros`.
     /// let v2 = Variant::from(datetime_micros);
     /// assert_eq!(v2.as_timestamp_nanos(), Some(datetime_micros));
@@ -709,37 +695,31 @@ impl<'m, 'v> Variant<'m, 'v> {
     /// let v3 = Variant::from("hello!");
     /// assert_eq!(v3.as_timestamp_nanos(), None);
     /// ```
-    pub fn as_timestamp_nanos(&self) -> Option<DateTime<Utc>> {
+    pub fn as_timestamp_nanos(&self) -> Option<Timestamp> {
         match *self {
             Variant::TimestampNanos(d) | Variant::TimestampMicros(d) => Some(d),
             _ => None,
         }
     }
 
-    /// Converts this variant to a `NaiveDateTime` if possible.
+    /// Converts this variant to a [`jiff::civil::DateTime`] if possible.
     ///
-    /// Returns `Some(NaiveDateTime)` for timestamp variants,
+    /// Returns `Some(DateTime)` for timestamp variants,
     /// `None` for other variants.
     ///
     /// # Examples
     ///
     /// ```
     /// use parquet_variant::Variant;
-    /// use chrono::NaiveDate;
+    /// use jiff::civil::date;
     ///
-    /// // you can extract a NaiveDateTime from a non-UTC-adjusted variant
-    /// let datetime = NaiveDate::from_ymd_opt(2025, 4, 16)
-    ///     .unwrap()
-    ///     .and_hms_nano_opt(12, 34, 56, 789123456)
-    ///     .unwrap();
+    /// // you can extract a DateTime from a non-UTC-adjusted variant
+    /// let datetime = date(2025, 4, 16).at(12, 34, 56, 789123456);
     /// let v1 = Variant::from(datetime);
     /// assert_eq!(v1.as_timestamp_ntz_nanos(), Some(datetime));
     ///
     /// // or from a microsecond-precision non-UTC-adjusted variant
-    /// let datetime_micros = NaiveDate::from_ymd_opt(2025, 8, 14)
-    ///     .unwrap()
-    ///     .and_hms_milli_opt(12, 33, 54, 123)
-    ///     .unwrap();
+    /// let datetime_micros = date(2025, 8, 14).at(12, 33, 54, 123_000_000);
     /// // this will convert to `Variant::TimestampMicros`.
     /// let v2 = Variant::from(datetime_micros);
     /// assert_eq!(v2.as_timestamp_ntz_nanos(), Some(datetime_micros));
@@ -748,7 +728,7 @@ impl<'m, 'v> Variant<'m, 'v> {
     /// let v3 = Variant::from("hello!");
     /// assert_eq!(v3.as_timestamp_ntz_nanos(), None);
     /// ```
-    pub fn as_timestamp_ntz_nanos(&self) -> Option<NaiveDateTime> {
+    pub fn as_timestamp_ntz_nanos(&self) -> Option<DateTime> {
         match *self {
             Variant::TimestampNtzNanos(d) | Variant::TimestampNtzMicros(d) => Some(d),
             _ => None,
@@ -1466,19 +1446,19 @@ impl<'m, 'v> Variant<'m, 'v> {
         }
     }
 
-    /// Converts this variant to a `NaiveTime` if possible.
+    /// Converts this variant to a [`jiff::civil::Time`] if possible.
     ///
-    /// Returns `Some(NaiveTime)` for `Variant::Time`,
+    /// Returns `Some(Time)` for `Variant::Time`,
     /// `None` for non-Time variants.
     ///
     /// # Example
     ///
     /// ```
-    /// use chrono::NaiveTime;
+    /// use jiff::civil::time;
     /// use parquet_variant::Variant;
     ///
-    /// // you can extract a `NaiveTime` from a `Variant::Time`
-    /// let time = NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap();
+    /// // you can extract a `Time` from a `Variant::Time`
+    /// let time = time(1, 2, 3, 4_000);
     /// let v1 = Variant::from(time);
     /// assert_eq!(Some(time), v1.as_time_utc());
     ///
@@ -1486,7 +1466,7 @@ impl<'m, 'v> Variant<'m, 'v> {
     /// let v2 = Variant::from("Hello");
     /// assert_eq!(None, v2.as_time_utc());
     /// ```
-    pub fn as_time_utc(&'m self) -> Option<NaiveTime> {
+    pub fn as_time_utc(&'m self) -> Option<Time> {
         if let Variant::Time(time) = self {
             Some(*time)
         } else {
@@ -1691,15 +1671,16 @@ impl From<f64> for Variant<'_, '_> {
     }
 }
 
-impl From<NaiveDate> for Variant<'_, '_> {
-    fn from(value: NaiveDate) -> Self {
+impl From<Date> for Variant<'_, '_> {
+    fn from(value: Date) -> Self {
         Variant::Date(value)
     }
 }
 
-impl From<DateTime<Utc>> for Variant<'_, '_> {
-    fn from(value: DateTime<Utc>) -> Self {
-        if !value.nanosecond().is_multiple_of(1000) {
+impl From<Timestamp> for Variant<'_, '_> {
+    fn from(value: Timestamp) -> Self {
+        // subsec_nanosecond is negative before the epoch; `% 1000 != 0` holds either way
+        if value.subsec_nanosecond() % 1000 != 0 {
             Variant::TimestampNanos(value)
         } else {
             Variant::TimestampMicros(value)
@@ -1707,9 +1688,9 @@ impl From<DateTime<Utc>> for Variant<'_, '_> {
     }
 }
 
-impl From<NaiveDateTime> for Variant<'_, '_> {
-    fn from(value: NaiveDateTime) -> Self {
-        if !value.nanosecond().is_multiple_of(1000) {
+impl From<DateTime> for Variant<'_, '_> {
+    fn from(value: DateTime) -> Self {
+        if value.subsec_nanosecond() % 1000 != 0 {
             Variant::TimestampNtzNanos(value)
         } else {
             Variant::TimestampNtzMicros(value)
@@ -1723,8 +1704,8 @@ impl<'v> From<&'v [u8]> for Variant<'_, 'v> {
     }
 }
 
-impl From<NaiveTime> for Variant<'_, '_> {
-    fn from(value: NaiveTime) -> Self {
+impl From<Time> for Variant<'_, '_> {
+    fn from(value: Time) -> Self {
         Variant::Time(value)
     }
 }
@@ -1814,16 +1795,26 @@ impl std::fmt::Debug for Variant<'_, '_> {
             Variant::Decimal4(d) => f.debug_tuple("Decimal4").field(d).finish(),
             Variant::Decimal8(d) => f.debug_tuple("Decimal8").field(d).finish(),
             Variant::Decimal16(d) => f.debug_tuple("Decimal16").field(d).finish(),
-            Variant::Date(d) => f.debug_tuple("Date").field(d).finish(),
-            Variant::TimestampMicros(ts) => f.debug_tuple("TimestampMicros").field(ts).finish(),
-            Variant::TimestampNtzMicros(ts) => {
-                f.debug_tuple("TimestampNtzMicros").field(ts).finish()
-            }
-            Variant::TimestampNanos(ts) => f.debug_tuple("TimestampNanos").field(ts).finish(),
-            Variant::TimestampNtzNanos(ts) => f.debug_tuple("TimestampNtzNanos").field(ts).finish(),
+            Variant::Date(d) => f.debug_tuple("Date").field(&DateDebug(*d)).finish(),
+            Variant::TimestampMicros(ts) => f
+                .debug_tuple("TimestampMicros")
+                .field(&TimestampDebug(*ts))
+                .finish(),
+            Variant::TimestampNtzMicros(ts) => f
+                .debug_tuple("TimestampNtzMicros")
+                .field(&DateTimeDebug(*ts))
+                .finish(),
+            Variant::TimestampNanos(ts) => f
+                .debug_tuple("TimestampNanos")
+                .field(&TimestampDebug(*ts))
+                .finish(),
+            Variant::TimestampNtzNanos(ts) => f
+                .debug_tuple("TimestampNtzNanos")
+                .field(&DateTimeDebug(*ts))
+                .finish(),
             Variant::Binary(bytes) => write!(f, "Binary({:?})", HexString(bytes)),
             Variant::String(s) => f.debug_tuple("String").field(s).finish(),
-            Variant::Time(s) => f.debug_tuple("Time").field(s).finish(),
+            Variant::Time(s) => f.debug_tuple("Time").field(&TimeDebug(*s)).finish(),
             Variant::ShortString(s) => f.debug_tuple("ShortString").field(s).finish(),
             Variant::Uuid(uuid) => f.debug_tuple("Uuid").field(&uuid).finish(),
             Variant::Object(obj) => {
@@ -1897,39 +1888,29 @@ mod tests {
         root_obj.insert("double", 1.23456789f64);
 
         // Add date and timestamp types
-        let date = chrono::NaiveDate::from_ymd_opt(2024, 12, 25).unwrap();
+        let date = jiff::civil::date(2024, 12, 25);
         root_obj.insert("date", date);
 
-        let timestamp_utc = chrono::NaiveDate::from_ymd_opt(2024, 12, 25)
-            .unwrap()
-            .and_hms_milli_opt(15, 30, 45, 123)
-            .unwrap()
-            .and_utc();
+        let timestamp_utc = jiff::tz::Offset::UTC
+            .to_timestamp(jiff::civil::date(2024, 12, 25).at(15, 30, 45, 123_000_000))
+            .unwrap();
         root_obj.insert("timestamp_micros", Variant::TimestampMicros(timestamp_utc));
 
-        let timestamp_ntz = chrono::NaiveDate::from_ymd_opt(2024, 12, 25)
-            .unwrap()
-            .and_hms_milli_opt(15, 30, 45, 123)
-            .unwrap();
+        let timestamp_ntz = jiff::civil::date(2024, 12, 25).at(15, 30, 45, 123_000_000);
         root_obj.insert(
             "timestamp_ntz_micros",
             Variant::TimestampNtzMicros(timestamp_ntz),
         );
 
-        let timestamp_nanos_utc = chrono::NaiveDate::from_ymd_opt(2025, 8, 15)
-            .unwrap()
-            .and_hms_nano_opt(12, 3, 4, 123456789)
-            .unwrap()
-            .and_utc();
+        let timestamp_nanos_utc = jiff::tz::Offset::UTC
+            .to_timestamp(jiff::civil::date(2025, 8, 15).at(12, 3, 4, 123456789))
+            .unwrap();
         root_obj.insert(
             "timestamp_nanos",
             Variant::TimestampNanos(timestamp_nanos_utc),
         );
 
-        let timestamp_ntz_nanos = chrono::NaiveDate::from_ymd_opt(2025, 8, 15)
-            .unwrap()
-            .and_hms_nano_opt(12, 3, 4, 123456789)
-            .unwrap();
+        let timestamp_ntz_nanos = jiff::civil::date(2025, 8, 15).at(12, 3, 4, 123456789);
         root_obj.insert(
             "timestamp_ntz_nanos",
             Variant::TimestampNtzNanos(timestamp_ntz_nanos),
@@ -1953,7 +1934,7 @@ mod tests {
             "This is a long string that exceeds the short string limit and contains emoji 🦀";
         root_obj.insert("string", long_string);
         root_obj.insert("short_string", "Short string with emoji 🎉");
-        let time = NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap();
+        let time = jiff::civil::time(1, 2, 3, 4_000);
         root_obj.insert("time", time);
 
         // Add uuid

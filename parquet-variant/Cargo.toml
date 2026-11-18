@@ -30,7 +30,8 @@ rust-version = { workspace = true }
 
 [dependencies]
 arrow-schema = { workspace = true }
-chrono = { workspace = true }
+# jiff replaces chrono (RUSTSEC-2026-0543 marks every chrono release unmaintained).
+jiff = { version = "0.2.46", default-features = false }
 half = { version = "2.1", default-features = false }
 indexmap = "2.10.0"
 uuid = { version = "1.18.0", features = ["v4"] }
@@ -45,6 +46,9 @@ name = "parquet_variant"
 bench = false
 
 [dev-dependencies]
+# chrono is kept only as a test oracle: the encoding and Debug text produced
+# with jiff are checked against what the chrono-based implementation produced.
+chrono = { workspace = true }
 proptest = { version = "1.0", default-features = false, features = ["std"] }
 criterion = { workspace = true, default-features = false }
 rand = { version = "0.10", default-features = false, features = [

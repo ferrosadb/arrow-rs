@@ -15,12 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 use crate::decoder::{OffsetSizeBytes, VariantBasicType, VariantPrimitiveType};
+use crate::temporal;
 use crate::{
     ShortString, Variant, VariantDecimal4, VariantDecimal8, VariantDecimal16, VariantList,
     VariantMetadata, VariantObject,
 };
 use arrow_schema::ArrowError;
-use chrono::Timelike;
 use uuid::Uuid;
 
 mod list;
@@ -32,8 +32,6 @@ pub use metadata::*;
 pub use object::*;
 
 pub(crate) const BASIC_TYPE_BITS: u8 = 2;
-pub(crate) const UNIX_EPOCH_DATE: chrono::NaiveDate =
-    chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
 
 fn primitive_header(primitive_type: VariantPrimitiveType) -> u8 {
     ((primitive_type as u8) << 2) | VariantBasicType::Primitive as u8
@@ -194,40 +192,39 @@ impl ValueBuilder {
         self.append_slice(&value.to_le_bytes());
     }
 
-    fn append_date(&mut self, value: chrono::NaiveDate) {
+    fn append_date(&mut self, value: jiff::civil::Date) {
         self.append_primitive_header(VariantPrimitiveType::Date);
-        let days_since_epoch = value.signed_duration_since(UNIX_EPOCH_DATE).num_days() as i32;
+        let days_since_epoch = temporal::date_to_days(value);
         self.append_slice(&days_since_epoch.to_le_bytes());
     }
 
-    fn append_timestamp_micros(&mut self, value: chrono::DateTime<chrono::Utc>) {
+    fn append_timestamp_micros(&mut self, value: jiff::Timestamp) {
         self.append_primitive_header(VariantPrimitiveType::TimestampMicros);
-        let micros = value.timestamp_micros();
+        let micros = temporal::timestamp_to_micros(value);
         self.append_slice(&micros.to_le_bytes());
     }
 
-    fn append_timestamp_ntz_micros(&mut self, value: chrono::NaiveDateTime) {
+    fn append_timestamp_ntz_micros(&mut self, value: jiff::civil::DateTime) {
         self.append_primitive_header(VariantPrimitiveType::TimestampNtzMicros);
-        let micros = value.and_utc().timestamp_micros();
+        let micros = temporal::datetime_to_micros(value);
         self.append_slice(&micros.to_le_bytes());
     }
 
-    fn append_time_micros(&mut self, value: chrono::NaiveTime) {
+    fn append_time_micros(&mut self, value: jiff::civil::Time) {
         self.append_primitive_header(VariantPrimitiveType::Time);
-        let micros_from_midnight = value.num_seconds_from_midnight() as u64 * 1_000_000
-            + value.nanosecond() as u64 / 1_000;
+        let micros_from_midnight = temporal::time_to_micros(value);
         self.append_slice(&micros_from_midnight.to_le_bytes());
     }
 
-    fn append_timestamp_nanos(&mut self, value: chrono::DateTime<chrono::Utc>) {
+    fn append_timestamp_nanos(&mut self, value: jiff::Timestamp) {
         self.append_primitive_header(VariantPrimitiveType::TimestampNanos);
-        let nanos = value.timestamp_nanos_opt().unwrap();
+        let nanos = temporal::timestamp_to_nanos(value);
         self.append_slice(&nanos.to_le_bytes());
     }
 
-    fn append_timestamp_ntz_nanos(&mut self, value: chrono::NaiveDateTime) {
+    fn append_timestamp_ntz_nanos(&mut self, value: jiff::civil::DateTime) {
         self.append_primitive_header(VariantPrimitiveType::TimestampNtzNanos);
-        let nanos = value.and_utc().timestamp_nanos_opt().unwrap();
+        let nanos = temporal::datetime_to_nanos(value);
         self.append_slice(&nanos.to_le_bytes());
     }
 

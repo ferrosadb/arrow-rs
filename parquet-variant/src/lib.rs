@@ -34,6 +34,7 @@
 mod builder;
 mod decoder;
 mod path;
+mod temporal;
 mod utils;
 mod variant;
 

@@ -21,7 +21,9 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-use chrono::{DateTime, NaiveDate, NaiveTime};
+use jiff::civil::{Time, date};
+use jiff::tz::Offset;
+use jiff::{SignedDuration, Timestamp};
 use parquet_variant::{
     ShortString, Variant, VariantBuilder, VariantDecimal4, VariantDecimal8, VariantDecimal16,
 };
@@ -112,10 +114,7 @@ fn get_primitive_cases() -> Vec<(&'static str, Variant<'static, 'static>)> {
         ),
         ("primitive_boolean_false", Variant::BooleanFalse),
         ("primitive_boolean_true", Variant::BooleanTrue),
-        (
-            "primitive_date",
-            Variant::Date(NaiveDate::from_ymd_opt(2025, 4, 16).unwrap()),
-        ),
+        ("primitive_date", Variant::Date(date(2025, 4, 16))),
         (
             "primitive_decimal4",
             Variant::from(VariantDecimal4::try_new(1234i32, 2u8).unwrap()),
@@ -145,40 +144,26 @@ fn get_primitive_cases() -> Vec<(&'static str, Variant<'static, 'static>)> {
         (
             "primitive_timestamp",
             Variant::TimestampMicros(
-                NaiveDate::from_ymd_opt(2025, 4, 16)
-                    .unwrap()
-                    .and_hms_milli_opt(16, 34, 56, 780)
-                    .unwrap()
-                    .and_utc(),
+                Offset::UTC
+                    .to_timestamp(date(2025, 4, 16).at(16, 34, 56, 780_000_000))
+                    .unwrap(),
             ),
         ),
         (
             "primitive_timestampntz",
-            Variant::TimestampNtzMicros(
-                NaiveDate::from_ymd_opt(2025, 4, 16)
-                    .unwrap()
-                    .and_hms_milli_opt(12, 34, 56, 780)
-                    .unwrap(),
-            ),
+            Variant::TimestampNtzMicros(date(2025, 4, 16).at(12, 34, 56, 780_000_000)),
         ),
         (
             "primitive_timestamp_nanos",
             Variant::TimestampNanos(
-                NaiveDate::from_ymd_opt(2024, 11, 7)
-                    .unwrap()
-                    .and_hms_nano_opt(12, 33, 54, 123456789)
-                    .unwrap()
-                    .and_utc(),
+                Offset::UTC
+                    .to_timestamp(date(2024, 11, 7).at(12, 33, 54, 123456789))
+                    .unwrap(),
             ),
         ),
         (
             "primitive_timestampntz_nanos",
-            Variant::TimestampNtzNanos(
-                NaiveDate::from_ymd_opt(2024, 11, 7)
-                    .unwrap()
-                    .and_hms_nano_opt(12, 33, 54, 123456789)
-                    .unwrap(),
-            ),
+            Variant::TimestampNtzNanos(date(2024, 11, 7).at(12, 33, 54, 123456789)),
         ),
         (
             "primitive_uuid",
@@ -192,7 +177,7 @@ fn get_primitive_cases() -> Vec<(&'static str, Variant<'static, 'static>)> {
         ),
         (
             "primitive_time",
-            Variant::Time(NaiveTime::from_hms_micro_opt(12, 33, 54, 123456).unwrap()),
+            Variant::Time(Time::constant(12, 33, 54, 123_456_000)),
         ),
     ]
 }
@@ -511,16 +496,17 @@ fn generate_random_value(rng: &mut StdRng, builder: &mut VariantBuilder, max_dep
         15 => {
             // Time
             builder.append_value(
-                NaiveTime::from_num_seconds_from_midnight_opt(
-                    // make the argument always valid
-                    rng.random_range(0..86_400),
-                    rng.random_range(0..1_000_000_000),
-                )
-                .unwrap(),
+                Time::midnight()
+                    .checked_add(SignedDuration::new(
+                        // make the argument always valid
+                        rng.random_range(0..86_400),
+                        rng.random_range(0..1_000_000_000),
+                    ))
+                    .unwrap(),
             )
         }
         16 => {
-            let data_time = DateTime::from_timestamp(
+            let data_time = Timestamp::new(
                 // make the argument always valid
                 rng.random_range(0..86_400),
                 rng.random_range(0..1_000_000_000),
@@ -529,9 +515,9 @@ fn generate_random_value(rng: &mut StdRng, builder: &mut VariantBuilder, max_dep
 
             // randomly pick timestamp with or without timezone
             if rng.random_bool(0.5) {
-                builder.append_value(data_time.naive_local());
+                builder.append_value(Offset::UTC.to_datetime(data_time));
             } else {
-                builder.append_value(data_time.naive_utc().and_utc());
+                builder.append_value(data_time);
             }
         }
         17 => {
