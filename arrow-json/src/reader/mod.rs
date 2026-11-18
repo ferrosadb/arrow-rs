@@ -136,7 +136,6 @@
 use std::io::BufRead;
 use std::sync::Arc;
 
-use chrono::Utc;
 use serde::Serialize;
 
 use arrow_array::timezone::Tz;
@@ -658,32 +657,32 @@ fn make_decoder(
         DataType::Float32 => primitive_decoder!(Float32Type, data_type),
         DataType::Float64 => primitive_decoder!(Float64Type, data_type),
         DataType::Timestamp(TimeUnit::Second, None) => {
-            Ok(Box::new(TimestampArrayDecoder::<TimestampSecondType, _>::new(data_type, Utc)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampSecondType>::new(data_type, Tz::UTC)))
         },
         DataType::Timestamp(TimeUnit::Millisecond, None) => {
-            Ok(Box::new(TimestampArrayDecoder::<TimestampMillisecondType, _>::new(data_type, Utc)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampMillisecondType>::new(data_type, Tz::UTC)))
         },
         DataType::Timestamp(TimeUnit::Microsecond, None) => {
-            Ok(Box::new(TimestampArrayDecoder::<TimestampMicrosecondType, _>::new(data_type, Utc)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampMicrosecondType>::new(data_type, Tz::UTC)))
         },
         DataType::Timestamp(TimeUnit::Nanosecond, None) => {
-            Ok(Box::new(TimestampArrayDecoder::<TimestampNanosecondType, _>::new(data_type, Utc)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampNanosecondType>::new(data_type, Tz::UTC)))
         },
         DataType::Timestamp(TimeUnit::Second, Some(ref tz)) => {
             let tz: Tz = tz.parse()?;
-            Ok(Box::new(TimestampArrayDecoder::<TimestampSecondType, _>::new(data_type, tz)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampSecondType>::new(data_type, tz)))
         },
         DataType::Timestamp(TimeUnit::Millisecond, Some(ref tz)) => {
             let tz: Tz = tz.parse()?;
-            Ok(Box::new(TimestampArrayDecoder::<TimestampMillisecondType, _>::new(data_type, tz)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampMillisecondType>::new(data_type, tz)))
         },
         DataType::Timestamp(TimeUnit::Microsecond, Some(ref tz)) => {
             let tz: Tz = tz.parse()?;
-            Ok(Box::new(TimestampArrayDecoder::<TimestampMicrosecondType, _>::new(data_type, tz)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampMicrosecondType>::new(data_type, tz)))
         },
         DataType::Timestamp(TimeUnit::Nanosecond, Some(ref tz)) => {
             let tz: Tz = tz.parse()?;
-            Ok(Box::new(TimestampArrayDecoder::<TimestampNanosecondType, _>::new(data_type, tz)))
+            Ok(Box::new(TimestampArrayDecoder::<TimestampNanosecondType>::new(data_type, tz)))
         },
         DataType::Date32 => primitive_decoder!(Date32Type, data_type),
         DataType::Date64 => primitive_decoder!(Date64Type, data_type),

@@ -126,11 +126,11 @@
 mod records;
 
 use arrow_array::builder::{NullBuilder, PrimitiveBuilder};
+use arrow_array::calendar::format::Rfc3339;
 use arrow_array::types::*;
 use arrow_array::*;
-use arrow_cast::parse::{parse_decimal, string_to_datetime, Parser};
+use arrow_cast::parse::{parse_decimal, string_to_zoned_datetime, Parser};
 use arrow_schema::*;
-use chrono::{TimeZone, Utc};
 use csv::StringRecord;
 use lazy_static::lazy_static;
 use regex::{Regex, RegexSet};
@@ -976,14 +976,14 @@ fn build_timestamp_array<T: ArrowTimestampType>(
     Ok(Arc::new(match timezone {
         Some(timezone) => {
             let tz: Tz = timezone.parse()?;
-            build_timestamp_array_impl::<T, _>(line_number, rows, col_idx, &tz, null_regex)?
+            build_timestamp_array_impl::<T>(line_number, rows, col_idx, &tz, null_regex)?
                 .with_timezone(timezone)
         }
-        None => build_timestamp_array_impl::<T, _>(line_number, rows, col_idx, &Utc, null_regex)?,
+        None => build_timestamp_array_impl::<T>(line_number, rows, col_idx, &Tz::UTC, null_regex)?,
     }))
 }
 
-fn build_timestamp_array_impl<T: ArrowTimestampType, Tz: TimeZone>(
+fn build_timestamp_array_impl<T: ArrowTimestampType>(
     line_number: usize,
     rows: &StringRecords<'_>,
     col_idx: usize,
@@ -998,15 +998,19 @@ fn build_timestamp_array_impl<T: ArrowTimestampType, Tz: TimeZone>(
                 return Ok(None);
             }
 
-            let date = string_to_datetime(timezone, s)
+            let date = string_to_zoned_datetime(timezone, s)
                 .and_then(|date| match T::UNIT {
-                    TimeUnit::Second => Ok(date.timestamp()),
-                    TimeUnit::Millisecond => Ok(date.timestamp_millis()),
-                    TimeUnit::Microsecond => Ok(date.timestamp_micros()),
-                    TimeUnit::Nanosecond => date.timestamp_nanos_opt().ok_or_else(|| {
+                    TimeUnit::Second => Ok(date.utc.timestamp()),
+                    TimeUnit::Millisecond => Ok(date.utc.timestamp_millis()),
+                    TimeUnit::Microsecond => Ok(date.utc.timestamp_micros()),
+                    TimeUnit::Nanosecond => date.utc.timestamp_nanos_opt().ok_or_else(|| {
+                        let rfc3339 = Rfc3339 {
+                            local: date.local(),
+                            offset: date.offset,
+                            use_z: false,
+                        };
                         ArrowError::ParseError(format!(
-                            "{} would overflow 64-bit signed nanoseconds",
-                            date.to_rfc3339(),
+                            "{rfc3339} would overflow 64-bit signed nanoseconds",
                         ))
                     }),
                 })

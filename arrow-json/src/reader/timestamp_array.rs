@@ -15,13 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use chrono::TimeZone;
 use std::marker::PhantomData;
 
 use arrow_array::builder::PrimitiveBuilder;
+use arrow_array::calendar::format::Rfc3339;
+use arrow_array::timezone::Tz;
 use arrow_array::types::ArrowTimestampType;
 use arrow_array::Array;
-use arrow_cast::parse::string_to_datetime;
+use arrow_cast::parse::string_to_zoned_datetime;
 use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, TimeUnit};
 
@@ -29,14 +30,14 @@ use crate::reader::tape::{Tape, TapeElement};
 use crate::reader::ArrayDecoder;
 
 /// A specialized [`ArrayDecoder`] for timestamps
-pub struct TimestampArrayDecoder<P: ArrowTimestampType, Tz: TimeZone> {
+pub struct TimestampArrayDecoder<P: ArrowTimestampType> {
     data_type: DataType,
     timezone: Tz,
     // Invariant and Send
     phantom: PhantomData<fn(P) -> P>,
 }
 
-impl<P: ArrowTimestampType, Tz: TimeZone> TimestampArrayDecoder<P, Tz> {
+impl<P: ArrowTimestampType> TimestampArrayDecoder<P> {
     pub fn new(data_type: DataType, timezone: Tz) -> Self {
         Self {
             data_type,
@@ -46,10 +47,9 @@ impl<P: ArrowTimestampType, Tz: TimeZone> TimestampArrayDecoder<P, Tz> {
     }
 }
 
-impl<P, Tz> ArrayDecoder for TimestampArrayDecoder<P, Tz>
+impl<P> ArrayDecoder for TimestampArrayDecoder<P>
 where
     P: ArrowTimestampType,
-    Tz: TimeZone + Send,
 {
     fn decode(&mut self, tape: &Tape<'_>, pos: &[u32]) -> Result<ArrayData, ArrowError> {
         let mut builder =
@@ -60,7 +60,7 @@ where
                 TapeElement::Null => builder.append_null(),
                 TapeElement::String(idx) => {
                     let s = tape.get_string(idx);
-                    let date = string_to_datetime(&self.timezone, s).map_err(|e| {
+                    let date = string_to_zoned_datetime(&self.timezone, s).map_err(|e| {
                         ArrowError::JsonError(format!(
                             "failed to parse \"{s}\" as {}: {}",
                             self.data_type, e
@@ -68,15 +68,21 @@ where
                     })?;
 
                     let value = match P::UNIT {
-                        TimeUnit::Second => date.timestamp(),
-                        TimeUnit::Millisecond => date.timestamp_millis(),
-                        TimeUnit::Microsecond => date.timestamp_micros(),
-                        TimeUnit::Nanosecond => date.timestamp_nanos_opt().ok_or_else(|| {
-                            ArrowError::ParseError(format!(
-                                "{} would overflow 64-bit signed nanoseconds",
-                                date.to_rfc3339(),
-                            ))
-                        })?,
+                        TimeUnit::Second => date.utc.timestamp(),
+                        TimeUnit::Millisecond => date.utc.timestamp_millis(),
+                        TimeUnit::Microsecond => date.utc.timestamp_micros(),
+                        TimeUnit::Nanosecond => {
+                            date.utc.timestamp_nanos_opt().ok_or_else(|| {
+                                let rfc3339 = Rfc3339 {
+                                    local: date.local(),
+                                    offset: date.offset,
+                                    use_z: false,
+                                };
+                                ArrowError::ParseError(format!(
+                                    "{rfc3339} would overflow 64-bit signed nanoseconds",
+                                ))
+                            })?
+                        }
                     };
                     builder.append_value(value)
                 }

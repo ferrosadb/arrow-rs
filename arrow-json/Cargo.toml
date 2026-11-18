@@ -44,10 +44,10 @@ indexmap = { version = "2.0", default-features = false, features = ["std"] }
 num = { version = "0.4", default-features = false, features = ["std"] }
 serde = { version = "1.0", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
-chrono = { workspace = true }
 lexical-core = { version = "1.0", default-features = false}
 
 [dev-dependencies]
+chrono = { workspace = true }
 tempfile = "3.3"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
