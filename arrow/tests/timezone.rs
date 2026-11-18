@@ -15,8 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow_cast::parse::string_to_datetime;
-use chrono::Utc;
+use arrow_array::calendar::format::Rfc3339;
+use arrow_array::timezone::Tz;
+use arrow_cast::parse::{string_to_datetime, string_to_zoned_datetime};
 
 #[test]
 fn test_parse_timezone() {
@@ -44,7 +45,14 @@ fn test_parse_timezone() {
     ];
 
     for (s, expected) in cases {
-        let actual = string_to_datetime(&Utc, s).unwrap().to_rfc3339();
+        let zoned = string_to_zoned_datetime(&Tz::UTC, s).unwrap();
+        let (local, offset) = (zoned.local(), zoned.offset);
+        let actual = Rfc3339 {
+            local,
+            offset,
+            use_z: false,
+        }
+        .to_string();
         assert_eq!(actual, expected, "{s}")
     }
 }
@@ -75,7 +83,7 @@ fn test_parse_timezone_invalid() {
     ];
 
     for (s, expected) in cases {
-        let actual = string_to_datetime(&Utc, s).unwrap_err().to_string();
+        let actual = string_to_datetime(&Tz::UTC, s).unwrap_err().to_string();
         assert_eq!(actual, expected)
     }
 }

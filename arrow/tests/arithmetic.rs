@@ -22,7 +22,6 @@ use arrow_array::temporal_conversions::as_datetime_with_timezone;
 use arrow_array::timezone::Tz;
 use arrow_array::types::*;
 use arrow_array::*;
-use chrono::{DateTime, TimeZone};
 
 #[test]
 fn test_temporal_array_timestamp_hour_with_timezone_using_chrono_tz() {
@@ -49,31 +48,36 @@ fn test_temporal_array_timestamp_hour_with_dst_timezone_using_chrono_tz() {
 
 fn test_timestamp_with_timezone_impl<T: ArrowTimestampType>(tz_str: &str) {
     let tz: Tz = tz_str.parse().unwrap();
+    // A local datetime that must be unambiguous in `tz`
+    let ymd_hms = |y: i16, mo: i8, d: i8, h: i8, mi: i8, s: i8| -> jiff::Zoned {
+        let dt = jiff::civil::date(y, mo, d).at(h, mi, s, 0);
+        tz.to_jiff().to_ambiguous_zoned(dt).unambiguous().unwrap()
+    };
 
-    let transform_array = |x: &dyn Array| -> Vec<DateTime<_>> {
+    let transform_array = |x: &dyn Array| -> Vec<jiff::Zoned> {
         x.as_primitive::<T>()
             .values()
             .into_iter()
-            .map(|x| as_datetime_with_timezone::<T>(*x, tz).unwrap())
+            .map(|x| as_datetime_with_timezone::<T>(*x, tz.clone()).unwrap())
             .collect()
     };
 
     let values = vec![
-        tz.with_ymd_and_hms(1970, 1, 28, 23, 0, 0)
-            .unwrap()
-            .naive_utc(),
-        tz.with_ymd_and_hms(1970, 1, 1, 0, 0, 0)
-            .unwrap()
-            .naive_utc(),
-        tz.with_ymd_and_hms(2010, 4, 1, 4, 0, 20)
-            .unwrap()
-            .naive_utc(),
-        tz.with_ymd_and_hms(1960, 1, 30, 4, 23, 20)
-            .unwrap()
-            .naive_utc(),
-        tz.with_ymd_and_hms(2023, 3, 25, 14, 0, 0)
-            .unwrap()
-            .naive_utc(),
+        ymd_hms(1970, 1, 28, 23, 0, 0)
+            .with_time_zone(jiff::tz::TimeZone::UTC)
+            .datetime(),
+        ymd_hms(1970, 1, 1, 0, 0, 0)
+            .with_time_zone(jiff::tz::TimeZone::UTC)
+            .datetime(),
+        ymd_hms(2010, 4, 1, 4, 0, 20)
+            .with_time_zone(jiff::tz::TimeZone::UTC)
+            .datetime(),
+        ymd_hms(1960, 1, 30, 4, 23, 20)
+            .with_time_zone(jiff::tz::TimeZone::UTC)
+            .datetime(),
+        ymd_hms(2023, 3, 25, 14, 0, 0)
+            .with_time_zone(jiff::tz::TimeZone::UTC)
+            .datetime(),
     ]
     .into_iter()
     .map(|x| T::make_value(x).unwrap())
@@ -93,11 +97,11 @@ fn test_timestamp_with_timezone_impl<T: ArrowTimestampType>(tz_str: &str) {
     assert_eq!(
         &transform_array(r1.as_ref()),
         &[
-            tz.with_ymd_and_hms(1970, 2, 28, 23, 0, 0).unwrap(),
-            tz.with_ymd_and_hms(1977, 11, 1, 0, 0, 0).unwrap(),
-            tz.with_ymd_and_hms(2008, 8, 1, 4, 0, 20).unwrap(),
-            tz.with_ymd_and_hms(1966, 9, 30, 4, 23, 20).unwrap(),
-            tz.with_ymd_and_hms(2023, 4, 25, 14, 0, 0).unwrap(),
+            ymd_hms(1970, 2, 28, 23, 0, 0),
+            ymd_hms(1977, 11, 1, 0, 0, 0),
+            ymd_hms(2008, 8, 1, 4, 0, 20),
+            ymd_hms(1966, 9, 30, 4, 23, 20),
+            ymd_hms(2023, 4, 25, 14, 0, 0),
         ]
     );
 
@@ -116,11 +120,11 @@ fn test_timestamp_with_timezone_impl<T: ArrowTimestampType>(tz_str: &str) {
     assert_eq!(
         &transform_array(r3.as_ref()),
         &[
-            tz.with_ymd_and_hms(1970, 1, 28, 23, 0, 0).unwrap(),
-            tz.with_ymd_and_hms(1970, 1, 6, 0, 7, 34).unwrap(),
-            tz.with_ymd_and_hms(2010, 2, 26, 4, 0, 20).unwrap(),
-            tz.with_ymd_and_hms(1960, 2, 6, 4, 23, 16).unwrap(),
-            tz.with_ymd_and_hms(2023, 3, 26, 14, 0, 0).unwrap(),
+            ymd_hms(1970, 1, 28, 23, 0, 0),
+            ymd_hms(1970, 1, 6, 0, 7, 34),
+            ymd_hms(2010, 2, 26, 4, 0, 20),
+            ymd_hms(1960, 2, 6, 4, 23, 16),
+            ymd_hms(2023, 3, 26, 14, 0, 0),
         ]
     );
 
@@ -139,11 +143,11 @@ fn test_timestamp_with_timezone_impl<T: ArrowTimestampType>(tz_str: &str) {
     assert_eq!(
         &transform_array(r5.as_ref()),
         &[
-            tz.with_ymd_and_hms(1970, 2, 28, 23, 0, 0).unwrap(),
-            tz.with_ymd_and_hms(1998, 10, 4, 23, 59, 17).unwrap(),
-            tz.with_ymd_and_hms(1960, 9, 29, 4, 0, 33).unwrap(),
-            tz.with_ymd_and_hms(1960, 7, 2, 4, 31, 33).unwrap(),
-            tz.with_ymd_and_hms(2023, 4, 25, 14, 0, 0).unwrap(),
+            ymd_hms(1970, 2, 28, 23, 0, 0),
+            ymd_hms(1998, 10, 4, 23, 59, 17),
+            ymd_hms(1960, 9, 29, 4, 0, 33),
+            ymd_hms(1960, 7, 2, 4, 31, 33),
+            ymd_hms(2023, 4, 25, 14, 0, 0),
         ]
     );
 
@@ -151,11 +155,11 @@ fn test_timestamp_with_timezone_impl<T: ArrowTimestampType>(tz_str: &str) {
     assert_eq!(
         &transform_array(r6.as_ref()),
         &[
-            tz.with_ymd_and_hms(1970, 1, 28, 23, 0, 0).unwrap(),
-            tz.with_ymd_and_hms(1970, 1, 2, 0, 0, 0).unwrap(),
-            tz.with_ymd_and_hms(2010, 4, 2, 4, 0, 20).unwrap(),
-            tz.with_ymd_and_hms(1960, 1, 31, 4, 23, 20).unwrap(),
-            tz.with_ymd_and_hms(2023, 3, 25, 14, 0, 0).unwrap(),
+            ymd_hms(1970, 1, 28, 23, 0, 0),
+            ymd_hms(1970, 1, 2, 0, 0, 0),
+            ymd_hms(2010, 4, 2, 4, 0, 20),
+            ymd_hms(1960, 1, 31, 4, 23, 20),
+            ymd_hms(2023, 3, 25, 14, 0, 0),
         ]
     );
 }
