@@ -1112,6 +1112,13 @@ async fn delete_fixtures(storage: &DynObjectStore) {
         .unwrap();
 }
 
+/// `format!("{writer}:{n:05300000},")`, which newer compilers reject because
+/// the width exceeds `u16::MAX`
+fn padded_part(writer: u8, n: usize) -> String {
+    let digits = n.to_string();
+    format!("{writer}:{}{digits},", "0".repeat(5_300_000 - digits.len()))
+}
+
 /// Tests a race condition where 2 threads are performing multipart writes to the same path
 pub async fn multipart_race_condition(storage: &dyn ObjectStore, last_writer_wins: bool) {
     let path = Path::from("test_multipart_race_condition");
@@ -1120,47 +1127,47 @@ pub async fn multipart_race_condition(storage: &dyn ObjectStore, last_writer_win
     let mut multipart_upload_2 = storage.put_multipart(&path).await.unwrap();
 
     multipart_upload_1
-        .put_part(Bytes::from(format!("1:{:05300000},", 0)).into())
+        .put_part(Bytes::from(padded_part(1, 0)).into())
         .await
         .unwrap();
     multipart_upload_2
-        .put_part(Bytes::from(format!("2:{:05300000},", 0)).into())
+        .put_part(Bytes::from(padded_part(2, 0)).into())
         .await
         .unwrap();
 
     multipart_upload_2
-        .put_part(Bytes::from(format!("2:{:05300000},", 1)).into())
+        .put_part(Bytes::from(padded_part(2, 1)).into())
         .await
         .unwrap();
     multipart_upload_1
-        .put_part(Bytes::from(format!("1:{:05300000},", 1)).into())
+        .put_part(Bytes::from(padded_part(1, 1)).into())
         .await
         .unwrap();
 
     multipart_upload_1
-        .put_part(Bytes::from(format!("1:{:05300000},", 2)).into())
+        .put_part(Bytes::from(padded_part(1, 2)).into())
         .await
         .unwrap();
     multipart_upload_2
-        .put_part(Bytes::from(format!("2:{:05300000},", 2)).into())
+        .put_part(Bytes::from(padded_part(2, 2)).into())
         .await
         .unwrap();
 
     multipart_upload_2
-        .put_part(Bytes::from(format!("2:{:05300000},", 3)).into())
+        .put_part(Bytes::from(padded_part(2, 3)).into())
         .await
         .unwrap();
     multipart_upload_1
-        .put_part(Bytes::from(format!("1:{:05300000},", 3)).into())
+        .put_part(Bytes::from(padded_part(1, 3)).into())
         .await
         .unwrap();
 
     multipart_upload_1
-        .put_part(Bytes::from(format!("1:{:05300000},", 4)).into())
+        .put_part(Bytes::from(padded_part(1, 4)).into())
         .await
         .unwrap();
     multipart_upload_2
-        .put_part(Bytes::from(format!("2:{:05300000},", 4)).into())
+        .put_part(Bytes::from(padded_part(2, 4)).into())
         .await
         .unwrap();
 
@@ -1180,19 +1187,17 @@ pub async fn multipart_race_condition(storage: &dyn ObjectStore, last_writer_win
 
     if last_writer_wins {
         assert!(string_contents.starts_with(
-            format!(
-                "2:{:05300000},2:{:05300000},2:{:05300000},2:{:05300000},2:{:05300000},",
-                0, 1, 2, 3, 4
-            )
-            .as_str()
+            (0..5)
+                .map(|n| padded_part(2, n))
+                .collect::<String>()
+                .as_str()
         ));
     } else {
         assert!(string_contents.starts_with(
-            format!(
-                "1:{:05300000},1:{:05300000},1:{:05300000},1:{:05300000},1:{:05300000},",
-                0, 1, 2, 3, 4
-            )
-            .as_str()
+            (0..5)
+                .map(|n| padded_part(1, n))
+                .collect::<String>()
+                .as_str()
         ));
     }
 }
