@@ -19,14 +19,15 @@
 
 use std::sync::Arc;
 
+use arrow_array::calendar::CivilDateTime;
 use arrow_array::cast::AsArray;
 use cast::as_primitive_array;
-use chrono::{Datelike, NaiveDateTime, Offset, TimeZone, Timelike, Utc};
 
 use arrow_array::temporal_conversions::{
-    date32_to_datetime, date64_to_datetime, timestamp_ms_to_datetime, timestamp_ns_to_datetime,
-    timestamp_s_to_datetime, timestamp_us_to_datetime, MICROSECONDS, MICROSECONDS_IN_DAY,
-    MILLISECONDS, MILLISECONDS_IN_DAY, NANOSECONDS, NANOSECONDS_IN_DAY, SECONDS_IN_DAY,
+    date32_to_civil_datetime, date64_to_civil_datetime, timestamp_ms_to_civil_datetime,
+    timestamp_ns_to_civil_datetime, timestamp_s_to_civil_datetime, timestamp_us_to_civil_datetime,
+    MICROSECONDS, MICROSECONDS_IN_DAY, MILLISECONDS, MILLISECONDS_IN_DAY, NANOSECONDS,
+    NANOSECONDS_IN_DAY, SECONDS_IN_DAY,
 };
 use arrow_array::timezone::Tz;
 use arrow_array::types::*;
@@ -79,29 +80,23 @@ impl std::fmt::Display for DatePart {
     }
 }
 
-/// Returns function to extract relevant [`DatePart`] from types like a
-/// [`NaiveDateTime`] or [`DateTime`].
-///
-/// [`DateTime`]: chrono::DateTime
-fn get_date_time_part_extract_fn<T>(part: DatePart) -> fn(T) -> i32
-where
-    T: ChronoDateExt + Datelike + Timelike,
-{
+/// Returns function to extract relevant [`DatePart`] from a (local) [`CivilDateTime`]
+fn get_date_time_part_extract_fn(part: DatePart) -> fn(CivilDateTime) -> i32 {
     match part {
-        DatePart::Quarter => |d| d.quarter() as i32,
-        DatePart::Year => |d| d.year(),
-        DatePart::Month => |d| d.month() as i32,
-        DatePart::Week => |d| d.iso_week().week() as i32,
-        DatePart::Day => |d| d.day() as i32,
-        DatePart::DayOfWeekSunday0 => |d| d.num_days_from_sunday(),
-        DatePart::DayOfWeekMonday0 => |d| d.num_days_from_monday(),
-        DatePart::DayOfYear => |d| d.ordinal() as i32,
-        DatePart::Hour => |d| d.hour() as i32,
-        DatePart::Minute => |d| d.minute() as i32,
-        DatePart::Second => |d| d.second() as i32,
-        DatePart::Millisecond => |d| (d.nanosecond() / 1_000_000) as i32,
-        DatePart::Microsecond => |d| (d.nanosecond() / 1_000) as i32,
-        DatePart::Nanosecond => |d| (d.nanosecond()) as i32,
+        DatePart::Quarter => |d| ((d.date.month() - 1) / 3 + 1) as i32,
+        DatePart::Year => |d| d.date.year(),
+        DatePart::Month => |d| d.date.month() as i32,
+        DatePart::Week => |d| d.date.iso_week().1 as i32,
+        DatePart::Day => |d| d.date.day() as i32,
+        DatePart::DayOfWeekSunday0 => |d| d.date.weekday().num_days_from_sunday() as i32,
+        DatePart::DayOfWeekMonday0 => |d| d.date.weekday().num_days_from_monday() as i32,
+        DatePart::DayOfYear => |d| d.date.ordinal() as i32,
+        DatePart::Hour => |d| d.time.hour() as i32,
+        DatePart::Minute => |d| d.time.minute() as i32,
+        DatePart::Second => |d| d.time.second() as i32,
+        DatePart::Millisecond => |d| (d.time.nanosecond() / 1_000_000) as i32,
+        DatePart::Microsecond => |d| (d.time.nanosecond() / 1_000) as i32,
+        DatePart::Nanosecond => |d| (d.time.nanosecond()) as i32,
     }
 }
 
@@ -337,7 +332,7 @@ impl ExtractDatePartExt for PrimitiveArray<Date32Type> {
             ))
         } else {
             let map_func = get_date_time_part_extract_fn(part);
-            Ok(self.unary_opt(|d| date32_to_datetime(d).map(map_func)))
+            Ok(self.unary_opt(|d| date32_to_civil_datetime(d).map(map_func)))
         }
     }
 }
@@ -345,7 +340,7 @@ impl ExtractDatePartExt for PrimitiveArray<Date32Type> {
 impl ExtractDatePartExt for PrimitiveArray<Date64Type> {
     fn date_part(&self, part: DatePart) -> Result<Int32Array, ArrowError> {
         let map_func = get_date_time_part_extract_fn(part);
-        Ok(self.unary_opt(|d| date64_to_datetime(d).map(map_func)))
+        Ok(self.unary_opt(|d| date64_to_civil_datetime(d).map(map_func)))
     }
 }
 
@@ -358,13 +353,14 @@ impl ExtractDatePartExt for PrimitiveArray<TimestampSecondType> {
             } else if let Some(tz) = get_tz(self.data_type())? {
                 let map_func = get_date_time_part_extract_fn(part);
                 self.unary_opt(|d| {
-                    timestamp_s_to_datetime(d)
-                        .map(|c| Utc.from_utc_datetime(&c).with_timezone(&tz))
+                    timestamp_s_to_civil_datetime(d)
+                        .and_then(|c| tz.from_utc(c))
+                        .map(|z| z.local())
                         .map(map_func)
                 })
             } else {
                 let map_func = get_date_time_part_extract_fn(part);
-                self.unary_opt(|d| timestamp_s_to_datetime(d).map(map_func))
+                self.unary_opt(|d| timestamp_s_to_civil_datetime(d).map(map_func))
             };
         Ok(array)
     }
@@ -375,13 +371,14 @@ impl ExtractDatePartExt for PrimitiveArray<TimestampMillisecondType> {
         let array = if let Some(tz) = get_tz(self.data_type())? {
             let map_func = get_date_time_part_extract_fn(part);
             self.unary_opt(|d| {
-                timestamp_ms_to_datetime(d)
-                    .map(|c| Utc.from_utc_datetime(&c).with_timezone(&tz))
+                timestamp_ms_to_civil_datetime(d)
+                    .and_then(|c| tz.from_utc(c))
+                    .map(|z| z.local())
                     .map(map_func)
             })
         } else {
             let map_func = get_date_time_part_extract_fn(part);
-            self.unary_opt(|d| timestamp_ms_to_datetime(d).map(map_func))
+            self.unary_opt(|d| timestamp_ms_to_civil_datetime(d).map(map_func))
         };
         Ok(array)
     }
@@ -392,13 +389,14 @@ impl ExtractDatePartExt for PrimitiveArray<TimestampMicrosecondType> {
         let array = if let Some(tz) = get_tz(self.data_type())? {
             let map_func = get_date_time_part_extract_fn(part);
             self.unary_opt(|d| {
-                timestamp_us_to_datetime(d)
-                    .map(|c| Utc.from_utc_datetime(&c).with_timezone(&tz))
+                timestamp_us_to_civil_datetime(d)
+                    .and_then(|c| tz.from_utc(c))
+                    .map(|z| z.local())
                     .map(map_func)
             })
         } else {
             let map_func = get_date_time_part_extract_fn(part);
-            self.unary_opt(|d| timestamp_us_to_datetime(d).map(map_func))
+            self.unary_opt(|d| timestamp_us_to_civil_datetime(d).map(map_func))
         };
         Ok(array)
     }
@@ -409,13 +407,14 @@ impl ExtractDatePartExt for PrimitiveArray<TimestampNanosecondType> {
         let array = if let Some(tz) = get_tz(self.data_type())? {
             let map_func = get_date_time_part_extract_fn(part);
             self.unary_opt(|d| {
-                timestamp_ns_to_datetime(d)
-                    .map(|c| Utc.from_utc_datetime(&c).with_timezone(&tz))
+                timestamp_ns_to_civil_datetime(d)
+                    .and_then(|c| tz.from_utc(c))
+                    .map(|z| z.local())
                     .map(map_func)
             })
         } else {
             let map_func = get_date_time_part_extract_fn(part);
-            self.unary_opt(|d| timestamp_ns_to_datetime(d).map(map_func))
+            self.unary_opt(|d| timestamp_ns_to_civil_datetime(d).map(map_func))
         };
         Ok(array)
     }
@@ -631,51 +630,19 @@ macro_rules! return_compute_error_with {
 
 pub(crate) use return_compute_error_with;
 
-// Internal trait, which is used for mapping values from DateLike structures
-trait ChronoDateExt {
-    /// Returns a value in range `1..=4` indicating the quarter this date falls into
-    fn quarter(&self) -> u32;
-
-    /// Returns a value in range `0..=3` indicating the quarter (zero-based) this date falls into
-    fn quarter0(&self) -> u32;
-
-    /// Returns the day of week; Monday is encoded as `0`, Tuesday as `1`, etc.
-    fn num_days_from_monday(&self) -> i32;
-
-    /// Returns the day of week; Sunday is encoded as `0`, Monday as `1`, etc.
-    fn num_days_from_sunday(&self) -> i32;
-}
-
-impl<T: Datelike> ChronoDateExt for T {
-    fn quarter(&self) -> u32 {
-        self.quarter0() + 1
-    }
-
-    fn quarter0(&self) -> u32 {
-        self.month0() / 3
-    }
-
-    fn num_days_from_monday(&self) -> i32 {
-        self.weekday().num_days_from_monday() as i32
-    }
-
-    fn num_days_from_sunday(&self) -> i32 {
-        self.weekday().num_days_from_sunday() as i32
-    }
-}
-
 /// Parse the given string into a string representing fixed-offset that is correct as of the given
-/// UTC NaiveDateTime.
+/// UTC datetime.
 ///
 /// Note that the offset is function of time and can vary depending on whether daylight savings is
 /// in effect or not. e.g. Australia/Sydney is +10:00 or +11:00 depending on DST.
 #[deprecated(note = "Use arrow_array::timezone::Tz instead")]
 pub fn using_chrono_tz_and_utc_naive_date_time(
     tz: &str,
-    utc: NaiveDateTime,
-) -> Option<chrono::offset::FixedOffset> {
+    utc: jiff::civil::DateTime,
+) -> Option<jiff::tz::Offset> {
     let tz: Tz = tz.parse().ok()?;
-    Some(tz.offset_from_utc_datetime(&utc).fix())
+    let offset = tz.offset_from_utc(&utc.into())?;
+    jiff::tz::Offset::from_seconds(offset).ok()
 }
 
 /// Extracts the hours of a given array as an array of integers within

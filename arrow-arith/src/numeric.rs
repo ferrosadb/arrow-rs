@@ -342,13 +342,13 @@ fn float_op<T: ArrowPrimitiveType>(
 trait TimestampOp: ArrowTimestampType {
     type Duration: ArrowPrimitiveType<Native = i64>;
 
-    fn add_year_month(timestamp: i64, delta: i32, tz: Tz) -> Option<i64>;
-    fn add_day_time(timestamp: i64, delta: IntervalDayTime, tz: Tz) -> Option<i64>;
-    fn add_month_day_nano(timestamp: i64, delta: IntervalMonthDayNano, tz: Tz) -> Option<i64>;
+    fn add_year_month(timestamp: i64, delta: i32, tz: &Tz) -> Option<i64>;
+    fn add_day_time(timestamp: i64, delta: IntervalDayTime, tz: &Tz) -> Option<i64>;
+    fn add_month_day_nano(timestamp: i64, delta: IntervalMonthDayNano, tz: &Tz) -> Option<i64>;
 
-    fn sub_year_month(timestamp: i64, delta: i32, tz: Tz) -> Option<i64>;
-    fn sub_day_time(timestamp: i64, delta: IntervalDayTime, tz: Tz) -> Option<i64>;
-    fn sub_month_day_nano(timestamp: i64, delta: IntervalMonthDayNano, tz: Tz) -> Option<i64>;
+    fn sub_year_month(timestamp: i64, delta: i32, tz: &Tz) -> Option<i64>;
+    fn sub_day_time(timestamp: i64, delta: IntervalDayTime, tz: &Tz) -> Option<i64>;
+    fn sub_month_day_nano(timestamp: i64, delta: IntervalMonthDayNano, tz: &Tz) -> Option<i64>;
 }
 
 macro_rules! timestamp {
@@ -356,27 +356,27 @@ macro_rules! timestamp {
         impl TimestampOp for $t {
             type Duration = $d;
 
-            fn add_year_month(left: i64, right: i32, tz: Tz) -> Option<i64> {
+            fn add_year_month(left: i64, right: i32, tz: &Tz) -> Option<i64> {
                 Self::add_year_months(left, right, tz)
             }
 
-            fn add_day_time(left: i64, right: IntervalDayTime, tz: Tz) -> Option<i64> {
+            fn add_day_time(left: i64, right: IntervalDayTime, tz: &Tz) -> Option<i64> {
                 Self::add_day_time(left, right, tz)
             }
 
-            fn add_month_day_nano(left: i64, right: IntervalMonthDayNano, tz: Tz) -> Option<i64> {
+            fn add_month_day_nano(left: i64, right: IntervalMonthDayNano, tz: &Tz) -> Option<i64> {
                 Self::add_month_day_nano(left, right, tz)
             }
 
-            fn sub_year_month(left: i64, right: i32, tz: Tz) -> Option<i64> {
+            fn sub_year_month(left: i64, right: i32, tz: &Tz) -> Option<i64> {
                 Self::subtract_year_months(left, right, tz)
             }
 
-            fn sub_day_time(left: i64, right: IntervalDayTime, tz: Tz) -> Option<i64> {
+            fn sub_day_time(left: i64, right: IntervalDayTime, tz: &Tz) -> Option<i64> {
                 Self::subtract_day_time(left, right, tz)
             }
 
-            fn sub_month_day_nano(left: i64, right: IntervalMonthDayNano, tz: Tz) -> Option<i64> {
+            fn sub_month_day_nano(left: i64, right: IntervalMonthDayNano, tz: &Tz) -> Option<i64> {
                 Self::subtract_month_day_nano(left, right, tz)
             }
         }
@@ -423,7 +423,7 @@ fn timestamp_op<T: TimestampOp>(
                 l_s,
                 r,
                 r_s,
-                T::add_year_month(l, r, l_tz).ok_or(ArrowError::ComputeError(
+                T::add_year_month(l, r, &l_tz).ok_or(ArrowError::ComputeError(
                     "Timestamp out of range".to_string()
                 ))
             )
@@ -435,7 +435,7 @@ fn timestamp_op<T: TimestampOp>(
                 l_s,
                 r,
                 r_s,
-                T::sub_year_month(l, r, l_tz).ok_or(ArrowError::ComputeError(
+                T::sub_year_month(l, r, &l_tz).ok_or(ArrowError::ComputeError(
                     "Timestamp out of range".to_string()
                 ))
             )
@@ -448,7 +448,7 @@ fn timestamp_op<T: TimestampOp>(
                 l_s,
                 r,
                 r_s,
-                T::add_day_time(l, r, l_tz).ok_or(ArrowError::ComputeError(
+                T::add_day_time(l, r, &l_tz).ok_or(ArrowError::ComputeError(
                     "Timestamp out of range".to_string()
                 ))
             )
@@ -460,7 +460,7 @@ fn timestamp_op<T: TimestampOp>(
                 l_s,
                 r,
                 r_s,
-                T::sub_day_time(l, r, l_tz).ok_or(ArrowError::ComputeError(
+                T::sub_day_time(l, r, &l_tz).ok_or(ArrowError::ComputeError(
                     "Timestamp out of range".to_string()
                 ))
             )
@@ -473,7 +473,7 @@ fn timestamp_op<T: TimestampOp>(
                 l_s,
                 r,
                 r_s,
-                T::add_month_day_nano(l, r, l_tz).ok_or(ArrowError::ComputeError(
+                T::add_month_day_nano(l, r, &l_tz).ok_or(ArrowError::ComputeError(
                     "Timestamp out of range".to_string()
                 ))
             )
@@ -485,7 +485,7 @@ fn timestamp_op<T: TimestampOp>(
                 l_s,
                 r,
                 r_s,
-                T::sub_month_day_nano(l, r, l_tz).ok_or(ArrowError::ComputeError(
+                T::sub_month_day_nano(l, r, &l_tz).ok_or(ArrowError::ComputeError(
                     "Timestamp out of range".to_string()
                 ))
             )
@@ -847,9 +847,8 @@ fn decimal_op<T: DecimalType>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::temporal_conversions::{as_date, as_datetime};
+    use arrow_array::temporal_conversions::{as_civil_date, as_civil_datetime};
     use arrow_buffer::{i256, ScalarBuffer};
-    use chrono::{DateTime, NaiveDate};
 
     fn test_neg_primitive<T: ArrowPrimitiveType>(
         input: &[T::Native],
@@ -1189,7 +1188,7 @@ mod tests {
             x.as_primitive::<T>()
                 .values()
                 .into_iter()
-                .map(|x| as_datetime::<T>(*x).unwrap().to_string())
+                .map(|x| as_civil_datetime::<T>(*x).unwrap().to_string())
                 .collect()
         };
 
@@ -1199,7 +1198,10 @@ mod tests {
             "1960-01-30T04:23:20Z",
         ]
         .into_iter()
-        .map(|x| T::make_value(DateTime::parse_from_rfc3339(x).unwrap().naive_utc()).unwrap())
+        .map(|x| {
+            let ts: jiff::Timestamp = x.parse().unwrap();
+            T::make_value(ts.to_zoned(jiff::tz::TimeZone::UTC).datetime()).unwrap()
+        })
         .collect();
 
         let a = PrimitiveArray::<T>::new(values, None);
@@ -1404,14 +1406,14 @@ mod tests {
 
     fn test_date_impl<T: ArrowPrimitiveType, F>(f: F)
     where
-        F: Fn(NaiveDate) -> T::Native,
+        F: Fn(jiff::civil::Date) -> T::Native,
         T::Native: TryInto<i64>,
     {
         let a = PrimitiveArray::<T>::new(
             vec![
-                f(NaiveDate::from_ymd_opt(1979, 1, 30).unwrap()),
-                f(NaiveDate::from_ymd_opt(2010, 4, 3).unwrap()),
-                f(NaiveDate::from_ymd_opt(2008, 2, 29).unwrap()),
+                f(jiff::civil::date(1979, 1, 30)),
+                f(jiff::civil::date(2010, 4, 3)),
+                f(jiff::civil::date(2008, 2, 29)),
             ]
             .into(),
             None,
@@ -1428,7 +1430,7 @@ mod tests {
                 .values()
                 .into_iter()
                 .map(|x| {
-                    as_date::<T>((*x).try_into().ok().unwrap())
+                    as_civil_date::<T>((*x).try_into().ok().unwrap())
                         .unwrap()
                         .to_string()
                 })
