@@ -26,6 +26,8 @@
 use std::fmt::{Display, Formatter, Write};
 use std::ops::Range;
 
+use arrow_array::calendar::format::{DelayedFormat, FormatInput, Rfc3339};
+use arrow_array::calendar::{CivilDate, CivilDateTime};
 use arrow_array::cast::*;
 use arrow_array::temporal_conversions::*;
 use arrow_array::timezone::Tz;
@@ -33,7 +35,6 @@ use arrow_array::types::*;
 use arrow_array::*;
 use arrow_buffer::ArrowNativeType;
 use arrow_schema::*;
-use chrono::{NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc};
 use lexical_core::FormattedSize;
 
 type TimeFormat<'a> = Option<&'a str>;
@@ -478,20 +479,37 @@ decimal_display!(Decimal128Type, Decimal256Type);
 
 fn write_timestamp(
     f: &mut dyn Write,
-    naive: NaiveDateTime,
-    timezone: Option<Tz>,
+    naive: CivilDateTime,
+    timezone: Option<&Tz>,
     format: Option<&str>,
 ) -> FormatResult {
     match timezone {
         Some(tz) => {
-            let date = Utc.from_utc_datetime(&naive).with_timezone(&tz);
+            let zoned = tz.from_utc(naive).ok_or_else(|| {
+                ArrowError::CastError(format!(
+                    "Failed to determine the offset of {tz:?} at {naive:?}"
+                ))
+            })?;
+            let (local, offset) = (zoned.local(), zoned.offset);
             match format {
-                Some(s) => write!(f, "{}", date.format(s))?,
-                None => write!(f, "{}", date.to_rfc3339_opts(SecondsFormat::AutoSi, true))?,
+                Some(s) => write!(
+                    f,
+                    "{}",
+                    DelayedFormat::new(FormatInput::zoned(local, offset), s)
+                )?,
+                None => write!(
+                    f,
+                    "{}",
+                    Rfc3339 {
+                        local,
+                        offset,
+                        use_z: true
+                    }
+                )?,
             }
         }
         None => match format {
-            Some(s) => write!(f, "{}", naive.format(s))?,
+            Some(s) => write!(f, "{}", DelayedFormat::new(FormatInput::datetime(naive), s))?,
             None => write!(f, "{naive:?}")?,
         },
     }
@@ -513,7 +531,7 @@ macro_rules! timestamp_display {
 
             fn write(&self, s: &Self::State, idx: usize, f: &mut dyn Write) -> FormatResult {
                 let value = self.value(idx);
-                let naive = as_datetime::<$t>(value).ok_or_else(|| {
+                let naive = as_civil_datetime::<$t>(value).ok_or_else(|| {
                     ArrowError::CastError(format!(
                         "Failed to convert {} to datetime for {}",
                         value,
@@ -521,7 +539,7 @@ macro_rules! timestamp_display {
                     ))
                 })?;
 
-                write_timestamp(f, naive, s.0, s.1.clone())
+                write_timestamp(f, naive, s.0.as_ref(), s.1)
             }
         })+
     };
@@ -535,7 +553,7 @@ timestamp_display!(
 );
 
 macro_rules! temporal_display {
-    ($convert:ident, $format:ident, $t:ty) => {
+    ($convert:ident, $format:ident, $t:ty, $input:path) => {
         impl<'a> DisplayIndexState<'a> for &'a PrimitiveArray<$t> {
             type State = TimeFormat<'a>;
 
@@ -554,7 +572,7 @@ macro_rules! temporal_display {
                 })?;
 
                 match fmt {
-                    Some(s) => write!(f, "{}", naive.format(s))?,
+                    Some(s) => write!(f, "{}", DelayedFormat::new($input(naive), s))?,
                     None => write!(f, "{naive:?}")?,
                 }
                 Ok(())
@@ -564,16 +582,41 @@ macro_rules! temporal_display {
 }
 
 #[inline]
-fn date32_to_date(value: i32) -> Option<NaiveDate> {
-    Some(date32_to_datetime(value)?.date())
+fn date32_to_date(value: i32) -> Option<CivilDate> {
+    Some(date32_to_civil_datetime(value)?.date)
 }
 
-temporal_display!(date32_to_date, date_format, Date32Type);
-temporal_display!(date64_to_datetime, datetime_format, Date64Type);
-temporal_display!(time32s_to_time, time_format, Time32SecondType);
-temporal_display!(time32ms_to_time, time_format, Time32MillisecondType);
-temporal_display!(time64us_to_time, time_format, Time64MicrosecondType);
-temporal_display!(time64ns_to_time, time_format, Time64NanosecondType);
+temporal_display!(date32_to_date, date_format, Date32Type, FormatInput::date);
+temporal_display!(
+    date64_to_civil_datetime,
+    datetime_format,
+    Date64Type,
+    FormatInput::datetime
+);
+temporal_display!(
+    time32s_to_civil_time,
+    time_format,
+    Time32SecondType,
+    FormatInput::time
+);
+temporal_display!(
+    time32ms_to_civil_time,
+    time_format,
+    Time32MillisecondType,
+    FormatInput::time
+);
+temporal_display!(
+    time64us_to_civil_time,
+    time_format,
+    Time64MicrosecondType,
+    FormatInput::time
+);
+temporal_display!(
+    time64ns_to_civil_time,
+    time_format,
+    Time64NanosecondType,
+    FormatInput::time
+);
 
 macro_rules! duration_display {
     ($convert:ident, $t:ty, $scale:tt) => {
@@ -642,10 +685,10 @@ macro_rules! duration_fmt {
     }};
 }
 
-duration_display!(duration_s_to_duration, DurationSecondType, 0);
-duration_display!(duration_ms_to_duration, DurationMillisecondType, 3);
-duration_display!(duration_us_to_duration, DurationMicrosecondType, 6);
-duration_display!(duration_ns_to_duration, DurationNanosecondType, 9);
+duration_display!(duration_s_to_calendar_duration, DurationSecondType, 0);
+duration_display!(duration_ms_to_calendar_duration, DurationMillisecondType, 3);
+duration_display!(duration_us_to_calendar_duration, DurationMicrosecondType, 6);
+duration_display!(duration_ns_to_calendar_duration, DurationNanosecondType, 9);
 
 impl DisplayIndex for &PrimitiveArray<IntervalYearMonthType> {
     fn write(&self, idx: usize, f: &mut dyn Write) -> FormatResult {

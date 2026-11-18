@@ -18,12 +18,14 @@
 //! [`Parser`] implementations for converting strings to Arrow types
 //!
 //! Used by the CSV and JSON readers to convert strings to Arrow types
+use arrow_array::calendar::{
+    parse as fmt_parse, CivilDate, CivilDateTime, CivilTime, ZonedDateTime,
+};
 use arrow_array::timezone::Tz;
 use arrow_array::types::*;
 use arrow_array::ArrowNativeTypeOp;
 use arrow_buffer::ArrowNativeType;
 use arrow_schema::ArrowError;
-use chrono::prelude::*;
 use half::f16;
 use std::str::FromStr;
 
@@ -66,7 +68,7 @@ impl TimestampParser {
     }
 
     /// Parses a date of the form `1997-01-31`
-    fn date(&self) -> Option<NaiveDate> {
+    fn date(&self) -> Option<CivilDate> {
         if self.mask & 0b1111111111 != 0b1101101111 || !self.test(4, b'-') || !self.test(7, b'-') {
             return None;
         }
@@ -79,7 +81,7 @@ impl TimestampParser {
         let month = self.digits[5] * 10 + self.digits[6];
         let day = self.digits[8] * 10 + self.digits[9];
 
-        NaiveDate::from_ymd_opt(year as _, month as _, day as _)
+        CivilDate::from_ymd_opt(year as _, month as _, day as _)
     }
 
     /// Parses a time of any of forms
@@ -90,14 +92,14 @@ impl TimestampParser {
     /// - `092656`
     ///
     /// Returning the end byte offset
-    fn time(&self) -> Option<(NaiveTime, usize)> {
-        // Make a NaiveTime handling leap seconds
+    fn time(&self) -> Option<(CivilTime, usize)> {
+        // Make a CivilTime handling leap seconds
         let time = |hour, min, sec, nano| match sec {
             60 => {
                 let nano = 1_000_000_000 + nano;
-                NaiveTime::from_hms_nano_opt(hour as _, min as _, 59, nano)
+                CivilTime::from_hms_nano_opt(hour as _, min as _, 59, nano)
             }
-            _ => NaiveTime::from_hms_nano_opt(hour as _, min as _, sec as _, nano),
+            _ => CivilTime::from_hms_nano_opt(hour as _, min as _, sec as _, nano),
         };
 
         match (self.mask >> 11) & 0b11111111 {
@@ -173,9 +175,23 @@ impl TimestampParser {
 /// * "2023-01-01 04:05:06.789 PST",
 ///
 /// [IANA timezones]: https://www.iana.org/time-zones
-pub fn string_to_datetime<T: TimeZone>(timezone: &T, s: &str) -> Result<DateTime<T>, ArrowError> {
+pub fn string_to_datetime(timezone: &Tz, s: &str) -> Result<jiff::Zoned, ArrowError> {
+    let zoned = string_to_zoned_datetime(timezone, s)?;
+    let timestamp = zoned.utc.to_jiff_timestamp().ok_or_else(|| {
+        ArrowError::ParseError(format!(
+            "Error parsing timestamp from '{s}': {:?} cannot be represented by jiff::Timestamp",
+            zoned.utc
+        ))
+    })?;
+    Ok(jiff::Zoned::new(timestamp, timezone.to_jiff()))
+}
+
+/// Like [`string_to_datetime`] but returns arrow's calendar representation,
+/// which covers the full historical range and leap seconds (`23:59:60`)
+pub fn string_to_zoned_datetime(timezone: &Tz, s: &str) -> Result<ZonedDateTime, ArrowError> {
     let err =
         |ctx: &str| ArrowError::ParseError(format!("Error parsing timestamp from '{s}': {ctx}"));
+    let offset_err = || err("error computing timezone offset");
 
     let bytes = s.as_bytes();
     if bytes.len() < 10 {
@@ -185,11 +201,8 @@ pub fn string_to_datetime<T: TimeZone>(timezone: &T, s: &str) -> Result<DateTime
     let parser = TimestampParser::new(bytes);
     let date = parser.date().ok_or_else(|| err("error parsing date"))?;
     if bytes.len() == 10 {
-        let datetime = date.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
-        return timezone
-            .from_local_datetime(&datetime)
-            .single()
-            .ok_or_else(|| err("error computing timezone offset"));
+        let datetime = CivilDateTime::new(date, CivilTime::MIDNIGHT);
+        return timezone.from_local(datetime).ok_or_else(offset_err);
     }
 
     if !parser.test(10, b'T') && !parser.test(10, b't') && !parser.test(10, b' ') {
@@ -197,7 +210,7 @@ pub fn string_to_datetime<T: TimeZone>(timezone: &T, s: &str) -> Result<DateTime
     }
 
     let (time, mut tz_offset) = parser.time().ok_or_else(|| err("error parsing time"))?;
-    let datetime = date.and_time(time);
+    let datetime = CivilDateTime::new(date, time);
 
     if tz_offset == 32 {
         // Decimal overrun
@@ -207,24 +220,18 @@ pub fn string_to_datetime<T: TimeZone>(timezone: &T, s: &str) -> Result<DateTime
     }
 
     if bytes.len() <= tz_offset {
-        return timezone
-            .from_local_datetime(&datetime)
-            .single()
-            .ok_or_else(|| err("error computing timezone offset"));
+        return timezone.from_local(datetime).ok_or_else(offset_err);
     }
 
     if (bytes[tz_offset] == b'z' || bytes[tz_offset] == b'Z') && tz_offset == bytes.len() - 1 {
-        return Ok(timezone.from_utc_datetime(&datetime));
+        return timezone.from_utc(datetime).ok_or_else(offset_err);
     }
 
     // Parse remainder of string as timezone
     let parsed_tz: Tz = s[tz_offset..].trim_start().parse()?;
-    let parsed = parsed_tz
-        .from_local_datetime(&datetime)
-        .single()
-        .ok_or_else(|| err("error computing timezone offset"))?;
+    let parsed = parsed_tz.from_local(datetime).ok_or_else(offset_err)?;
 
-    Ok(parsed.with_timezone(timezone))
+    timezone.from_utc(parsed.utc).ok_or_else(offset_err)
 }
 
 /// Accepts a string in RFC3339 / ISO8601 standard format and some
@@ -235,7 +242,7 @@ pub fn string_to_datetime<T: TimeZone>(timezone: &T, s: &str) -> Result<DateTime
 /// Implements the `to_timestamp` function to convert a string to a
 /// timestamp, following the model of spark SQL’s to_`timestamp`.
 ///
-/// Internally, this function uses the `chrono` library for the
+/// Internally, this function uses arrow's `calendar` module for the
 /// datetime parsing
 ///
 /// We hope to extend this function in the future with a second
@@ -270,14 +277,13 @@ pub fn string_to_datetime<T: TimeZone>(timezone: &T, s: &str) -> Result<DateTime
 ///
 #[inline]
 pub fn string_to_timestamp_nanos(s: &str) -> Result<i64, ArrowError> {
-    to_timestamp_nanos(string_to_datetime(&Utc, s)?.naive_utc())
+    to_timestamp_nanos(string_to_zoned_datetime(&Tz::UTC, s)?.utc)
 }
 
-/// Fallible conversion of [`NaiveDateTime`] to `i64` nanoseconds
+/// Fallible conversion of [`CivilDateTime`] to `i64` nanoseconds
 #[inline]
-fn to_timestamp_nanos(dt: NaiveDateTime) -> Result<i64, ArrowError> {
-    dt.and_utc()
-        .timestamp_nanos_opt()
+fn to_timestamp_nanos(dt: CivilDateTime) -> Result<i64, ArrowError> {
+    dt.timestamp_nanos_opt()
         .ok_or_else(|| ArrowError::ParseError(ERR_NANOSECONDS_NOT_SUPPORTED.to_string()))
 }
 
@@ -290,7 +296,7 @@ fn to_timestamp_nanos(dt: NaiveDateTime) -> Result<i64, ArrowError> {
 /// * `23:59:59`
 /// * `6:00 pm`
 ///
-/// Internally, this function uses the `chrono` library for the time parsing
+/// Internally, this function uses arrow's `calendar` module for the time parsing
 ///
 /// ## Timezone / Offset Handling
 ///
@@ -302,7 +308,7 @@ pub fn string_to_time_nanoseconds(s: &str) -> Result<i64, ArrowError> {
     Ok(nt.num_seconds_from_midnight() as i64 * 1_000_000_000 + nt.nanosecond() as i64)
 }
 
-fn string_to_time(s: &str) -> Option<NaiveTime> {
+fn string_to_time(s: &str) -> Option<CivilTime> {
     let bytes = s.as_bytes();
     if bytes.len() < 4 {
         return None;
@@ -400,7 +406,7 @@ fn string_to_time(s: &str) -> Option<NaiveTime> {
         s => (s, nanoseconds),
     };
 
-    NaiveTime::from_hms_nano_opt(
+    CivilTime::from_hms_nano_opt(
         hour as _,
         (digits[2] * 10 + digits[3]) as _,
         second as _,
@@ -538,7 +544,7 @@ impl Parser for Time64NanosecondType {
     }
 
     fn parse_formatted(string: &str, format: &str) -> Option<Self::Native> {
-        let nt = NaiveTime::parse_from_str(string, format).ok()?;
+        let nt = fmt_parse::parse_time(string, format).ok()?;
         Some(nt.num_seconds_from_midnight() as i64 * 1_000_000_000 + nt.nanosecond() as i64)
     }
 }
@@ -553,7 +559,7 @@ impl Parser for Time64MicrosecondType {
     }
 
     fn parse_formatted(string: &str, format: &str) -> Option<Self::Native> {
-        let nt = NaiveTime::parse_from_str(string, format).ok()?;
+        let nt = fmt_parse::parse_time(string, format).ok()?;
         Some(nt.num_seconds_from_midnight() as i64 * 1_000_000 + nt.nanosecond() as i64 / 1_000)
     }
 }
@@ -568,7 +574,7 @@ impl Parser for Time32MillisecondType {
     }
 
     fn parse_formatted(string: &str, format: &str) -> Option<Self::Native> {
-        let nt = NaiveTime::parse_from_str(string, format).ok()?;
+        let nt = fmt_parse::parse_time(string, format).ok()?;
         Some(nt.num_seconds_from_midnight() as i32 * 1_000 + nt.nanosecond() as i32 / 1_000_000)
     }
 }
@@ -583,7 +589,7 @@ impl Parser for Time32SecondType {
     }
 
     fn parse_formatted(string: &str, format: &str) -> Option<Self::Native> {
-        let nt = NaiveTime::parse_from_str(string, format).ok()?;
+        let nt = fmt_parse::parse_time(string, format).ok()?;
         Some(nt.num_seconds_from_midnight() as i32 + nt.nanosecond() as i32 / 1_000_000_000)
     }
 }
@@ -594,11 +600,11 @@ const EPOCH_DAYS_FROM_CE: i32 = 719_163;
 /// Error message if nanosecond conversion request beyond supported interval
 const ERR_NANOSECONDS_NOT_SUPPORTED: &str = "The dates that can be represented as nanoseconds have to be between 1677-09-21T00:12:44.0 and 2262-04-11T23:47:16.854775804";
 
-fn parse_date(string: &str) -> Option<NaiveDate> {
+fn parse_date(string: &str) -> Option<CivilDate> {
     if string.len() > 10 {
         // Try to parse as datetime and return just the date part
-        return string_to_datetime(&Utc, string)
-            .map(|dt| dt.date_naive())
+        return string_to_zoned_datetime(&Tz::UTC, string)
+            .map(|dt| dt.utc.date)
             .ok();
     };
     let mut digits = [0; 10];
@@ -625,7 +631,7 @@ fn parse_date(string: &str) -> Option<NaiveDate> {
             ),
             _ => return None,
         };
-        return NaiveDate::from_ymd_opt(year as _, month as _, day as _);
+        return CivilDate::from_ymd_opt(year as _, month as _, day as _);
     }
 
     let (month, day) = match mask {
@@ -659,7 +665,7 @@ fn parse_date(string: &str) -> Option<NaiveDate> {
     let year =
         digits[0] as u16 * 1000 + digits[1] as u16 * 100 + digits[2] as u16 * 10 + digits[3] as u16;
 
-    NaiveDate::from_ymd_opt(year as _, month as _, day as _)
+    CivilDate::from_ymd_opt(year as _, month as _, day as _)
 }
 
 impl Parser for Date32Type {
@@ -669,7 +675,7 @@ impl Parser for Date32Type {
     }
 
     fn parse_formatted(string: &str, format: &str) -> Option<i32> {
-        let date = NaiveDate::parse_from_str(string, format).ok()?;
+        let date = fmt_parse::parse_date(string, format).ok()?;
         Some(date.num_days_from_ce() - EPOCH_DAYS_FROM_CE)
     }
 }
@@ -677,37 +683,21 @@ impl Parser for Date32Type {
 impl Parser for Date64Type {
     fn parse(string: &str) -> Option<i64> {
         if string.len() <= 10 {
-            let datetime = NaiveDateTime::new(parse_date(string)?, NaiveTime::default());
-            Some(datetime.and_utc().timestamp_millis())
+            let datetime = CivilDateTime::new(parse_date(string)?, CivilTime::MIDNIGHT);
+            Some(datetime.timestamp_millis())
         } else {
-            let date_time = string_to_datetime(&Utc, string).ok()?;
-            Some(date_time.timestamp_millis())
+            let date_time = string_to_zoned_datetime(&Tz::UTC, string).ok()?;
+            Some(date_time.utc.timestamp_millis())
         }
     }
 
     fn parse_formatted(string: &str, format: &str) -> Option<i64> {
-        use chrono::format::Fixed;
-        use chrono::format::StrftimeItems;
-        let fmt = StrftimeItems::new(format);
-        let has_zone = fmt.into_iter().any(|item| match item {
-            chrono::format::Item::Fixed(fixed_item) => matches!(
-                fixed_item,
-                Fixed::RFC2822
-                    | Fixed::RFC3339
-                    | Fixed::TimezoneName
-                    | Fixed::TimezoneOffsetColon
-                    | Fixed::TimezoneOffsetColonZ
-                    | Fixed::TimezoneOffset
-                    | Fixed::TimezoneOffsetZ
-            ),
-            _ => false,
-        });
-        if has_zone {
-            let date_time = chrono::DateTime::parse_from_str(string, format).ok()?;
-            Some(date_time.timestamp_millis())
+        if fmt_parse::format_has_zone(format) {
+            let date_time = fmt_parse::parse_datetime_with_offset(string, format).ok()?;
+            Some(date_time.utc.timestamp_millis())
         } else {
-            let date_time = NaiveDateTime::parse_from_str(string, format).ok()?;
-            Some(date_time.and_utc().timestamp_millis())
+            let date_time = fmt_parse::parse_datetime(string, format).ok()?;
+            Some(date_time.timestamp_millis())
         }
     }
 }
@@ -1494,7 +1484,24 @@ fn not_interval_amount(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::temporal_conversions::date32_to_datetime;
+    use arrow_array::temporal_conversions::date32_to_civil_datetime;
+    use chrono::prelude::*;
+
+    /// Converts a parsed UTC datetime to chrono, as an oracle for comparison
+    fn to_chrono(dt: CivilDateTime) -> NaiveDateTime {
+        let date = NaiveDate::from_num_days_from_ce_opt(dt.date.num_days_from_ce()).unwrap();
+        let time = NaiveTime::from_num_seconds_from_midnight_opt(
+            dt.time.num_seconds_from_midnight(),
+            dt.time.nanosecond(),
+        )
+        .unwrap();
+        date.and_time(time)
+    }
+
+    fn to_chrono_time(t: CivilTime) -> NaiveTime {
+        NaiveTime::from_num_seconds_from_midnight_opt(t.num_seconds_from_midnight(), t.nanosecond())
+            .unwrap()
+    }
     use arrow_buffer::i256;
 
     #[test]
@@ -1637,8 +1644,8 @@ mod tests {
             let chrono = DateTime::parse_from_rfc3339(case).unwrap();
             let chrono_utc = chrono.with_timezone(&Utc);
 
-            let custom = string_to_datetime(&Utc, case).unwrap();
-            assert_eq!(chrono_utc, custom)
+            let custom = string_to_zoned_datetime(&Tz::UTC, case).unwrap();
+            assert_eq!(chrono_utc.naive_utc(), to_chrono(custom.utc))
         }
     }
 
@@ -1652,8 +1659,8 @@ mod tests {
         ];
         for case in cases {
             let chrono = NaiveDateTime::parse_from_str(case, "%Y-%m-%dT%H:%M:%S%.f").unwrap();
-            let custom = string_to_datetime(&Utc, case).unwrap();
-            assert_eq!(chrono, custom.naive_utc())
+            let custom = string_to_zoned_datetime(&Tz::UTC, case).unwrap();
+            assert_eq!(chrono, to_chrono(custom.utc))
         }
     }
 
@@ -1684,7 +1691,7 @@ mod tests {
 
         for (s, ctx) in cases {
             let expected = format!("Parser error: Error parsing timestamp from '{s}': {ctx}");
-            let actual = string_to_datetime(&Utc, s).unwrap_err().to_string();
+            let actual = string_to_datetime(&Tz::UTC, s).unwrap_err().to_string();
             assert_eq!(actual, expected)
         }
     }
@@ -1735,31 +1742,35 @@ mod tests {
         );
 
         let tz: Tz = "+02:00".parse().unwrap();
-        let date = string_to_datetime(&tz, "2020-09-08 13:42:29").unwrap();
-        let utc = date.naive_utc().to_string();
+        let date = string_to_zoned_datetime(&tz, "2020-09-08 13:42:29").unwrap();
+        let utc = date.utc.to_string();
         assert_eq!(utc, "2020-09-08 11:42:29");
-        let local = date.naive_local().to_string();
+        let local = date.local().to_string();
         assert_eq!(local, "2020-09-08 13:42:29");
 
-        let date = string_to_datetime(&tz, "2020-09-08 13:42:29Z").unwrap();
-        let utc = date.naive_utc().to_string();
+        let date = string_to_zoned_datetime(&tz, "2020-09-08 13:42:29Z").unwrap();
+        let utc = date.utc.to_string();
         assert_eq!(utc, "2020-09-08 13:42:29");
-        let local = date.naive_local().to_string();
+        let local = date.local().to_string();
         assert_eq!(local, "2020-09-08 15:42:29");
+
+        // The jiff facing API agrees
+        let date = string_to_datetime(&tz, "2020-09-08 13:42:29Z").unwrap();
+        assert_eq!(date.to_string(), "2020-09-08T15:42:29+02:00[+02:00]");
 
         let dt =
             NaiveDateTime::parse_from_str("2020-09-08T13:42:29Z", "%Y-%m-%dT%H:%M:%SZ").unwrap();
         let local: Tz = "+08:00".parse().unwrap();
 
         // Parsed as offset from UTC
-        let date = string_to_datetime(&local, "2020-09-08T13:42:29Z").unwrap();
-        assert_eq!(dt, date.naive_utc());
-        assert_ne!(dt, date.naive_local());
+        let date = string_to_zoned_datetime(&local, "2020-09-08T13:42:29Z").unwrap();
+        assert_eq!(dt, to_chrono(date.utc));
+        assert_ne!(dt, to_chrono(date.local()));
 
         // Parsed as offset from local
-        let date = string_to_datetime(&local, "2020-09-08 13:42:29").unwrap();
-        assert_eq!(dt, date.naive_local());
-        assert_ne!(dt, date.naive_utc());
+        let date = string_to_zoned_datetime(&local, "2020-09-08 13:42:29").unwrap();
+        assert_eq!(dt, to_chrono(date.local()));
+        assert_ne!(dt, to_chrono(date.utc));
     }
 
     #[test]
@@ -1774,11 +1785,11 @@ mod tests {
             "2020-09-08 01:02:03",
         ];
         for case in cases {
-            let v = date32_to_datetime(Date32Type::parse(case).unwrap()).unwrap();
+            let v = date32_to_civil_datetime(Date32Type::parse(case).unwrap()).unwrap();
             let expected = NaiveDate::parse_from_str(case, "%Y-%m-%d")
                 .or(NaiveDate::parse_from_str(case, "%Y-%m-%d %H:%M:%S"))
                 .unwrap();
-            assert_eq!(v.date(), expected);
+            assert_eq!(to_chrono(v).date(), expected);
         }
 
         let err_cases = [
@@ -2109,7 +2120,7 @@ mod tests {
         ];
         for (s, format) in cases {
             let chrono = NaiveTime::parse_from_str(s, format).ok();
-            let custom = string_to_time(s);
+            let custom = string_to_time(s).map(to_chrono_time);
             assert_eq!(chrono, custom, "{s}");
         }
     }

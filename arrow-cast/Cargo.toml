@@ -46,7 +46,7 @@ arrow-buffer = { workspace = true }
 arrow-data = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 half = { version = "2.1", default-features = false }
 num = { version = "0.4", default-features = false, features = ["std"] }
 lexical-core = { version = "1.0", default-features = false, features = ["write-integers", "write-floats", "parse-integers", "parse-floats"] }
@@ -56,6 +56,7 @@ base64 = "0.22"
 ryu = "1.0.16"
 
 [dev-dependencies]
+chrono = { workspace = true }
 criterion = { version = "0.5", default-features = false }
 half = { version = "2.1", default-features = false }
 rand = "0.8"

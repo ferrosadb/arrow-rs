@@ -50,15 +50,15 @@ use crate::cast::string::*;
 
 use arrow_buffer::IntervalMonthDayNano;
 use arrow_data::ByteView;
-use chrono::{NaiveTime, Offset, TimeZone, Utc};
 use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::display::{ArrayFormatter, FormatOptions};
 use crate::parse::{
     parse_interval_day_time, parse_interval_month_day_nano, parse_interval_year_month,
-    string_to_datetime, Parser,
+    string_to_zoned_datetime, Parser,
 };
+use arrow_array::calendar::CivilTime;
 use arrow_array::{builder::*, cast::*, temporal_conversions::*, timezone::Tz, types::*, *};
 use arrow_buffer::{i256, ArrowNativeType, OffsetBuffer};
 use arrow_data::transform::MutableArrayData;
@@ -536,11 +536,11 @@ fn make_duration_array(array: &PrimitiveArray<Int64Type>, unit: TimeUnit) -> Arr
 
 fn as_time_res_with_timezone<T: ArrowPrimitiveType>(
     v: i64,
-    tz: Option<Tz>,
-) -> Result<NaiveTime, ArrowError> {
+    tz: Option<&Tz>,
+) -> Result<CivilTime, ArrowError> {
     let time = match tz {
-        Some(tz) => as_datetime_with_timezone::<T>(v, tz).map(|d| d.time()),
-        None => as_datetime::<T>(v).map(|d| d.time()),
+        Some(tz) => as_zoned_datetime::<T>(v, tz).map(|d| d.local().time),
+        None => as_civil_datetime::<T>(v).map(|d| d.time),
     };
 
     time.ok_or_else(|| {
@@ -566,15 +566,15 @@ fn timestamp_to_date32<T: ArrowTimestampType>(
         Some(tz) => {
             let tz: Tz = tz.parse()?;
             array.try_unary(|x| {
-                as_datetime_with_timezone::<T>(x, tz)
+                as_zoned_datetime::<T>(x, &tz)
                     .ok_or_else(|| err(x))
-                    .map(|d| Date32Type::from_naive_date(d.date_naive()))
+                    .map(|d| Date32Type::from_civil_date(d.local().date))
             })?
         }
         None => array.try_unary(|x| {
-            as_datetime::<T>(x)
+            as_civil_datetime::<T>(x)
                 .ok_or_else(|| err(x))
-                .map(|d| Date32Type::from_naive_date(d.date()))
+                .map(|d| Date32Type::from_civil_date(d.date))
         })?,
     };
     Ok(Arc::new(array))
@@ -1882,9 +1882,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampSecondType>()
                     .try_unary::<_, Time64MicrosecondType, ArrowError>(|x| {
-                        Ok(time_to_time64us(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time64us(as_time_res_with_timezone::<
                             TimestampSecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -1894,9 +1896,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampSecondType>()
                     .try_unary::<_, Time64NanosecondType, ArrowError>(|x| {
-                        Ok(time_to_time64ns(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time64ns(as_time_res_with_timezone::<
                             TimestampSecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -1906,9 +1910,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampMillisecondType>()
                     .try_unary::<_, Time64MicrosecondType, ArrowError>(|x| {
-                        Ok(time_to_time64us(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time64us(as_time_res_with_timezone::<
                             TimestampMillisecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -1918,9 +1924,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampMillisecondType>()
                     .try_unary::<_, Time64NanosecondType, ArrowError>(|x| {
-                        Ok(time_to_time64ns(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time64ns(as_time_res_with_timezone::<
                             TimestampMillisecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -1930,9 +1938,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampMicrosecondType>()
                     .try_unary::<_, Time64MicrosecondType, ArrowError>(|x| {
-                        Ok(time_to_time64us(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time64us(as_time_res_with_timezone::<
                             TimestampMicrosecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -1942,9 +1952,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampMicrosecondType>()
                     .try_unary::<_, Time64NanosecondType, ArrowError>(|x| {
-                        Ok(time_to_time64ns(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time64ns(as_time_res_with_timezone::<
                             TimestampMicrosecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -1954,9 +1966,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampNanosecondType>()
                     .try_unary::<_, Time64MicrosecondType, ArrowError>(|x| {
-                        Ok(time_to_time64us(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time64us(as_time_res_with_timezone::<
                             TimestampNanosecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -1966,9 +1980,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampNanosecondType>()
                     .try_unary::<_, Time64NanosecondType, ArrowError>(|x| {
-                        Ok(time_to_time64ns(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time64ns(as_time_res_with_timezone::<
                             TimestampNanosecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -1978,9 +1994,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampSecondType>()
                     .try_unary::<_, Time32SecondType, ArrowError>(|x| {
-                        Ok(time_to_time32s(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time32s(as_time_res_with_timezone::<
                             TimestampSecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -1990,9 +2008,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampSecondType>()
                     .try_unary::<_, Time32MillisecondType, ArrowError>(|x| {
-                        Ok(time_to_time32ms(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time32ms(as_time_res_with_timezone::<
                             TimestampSecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -2002,9 +2022,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampMillisecondType>()
                     .try_unary::<_, Time32SecondType, ArrowError>(|x| {
-                        Ok(time_to_time32s(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time32s(as_time_res_with_timezone::<
                             TimestampMillisecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -2014,9 +2036,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampMillisecondType>()
                     .try_unary::<_, Time32MillisecondType, ArrowError>(|x| {
-                        Ok(time_to_time32ms(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time32ms(as_time_res_with_timezone::<
                             TimestampMillisecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -2026,9 +2050,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampMicrosecondType>()
                     .try_unary::<_, Time32SecondType, ArrowError>(|x| {
-                        Ok(time_to_time32s(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time32s(as_time_res_with_timezone::<
                             TimestampMicrosecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -2038,9 +2064,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampMicrosecondType>()
                     .try_unary::<_, Time32MillisecondType, ArrowError>(|x| {
-                        Ok(time_to_time32ms(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time32ms(as_time_res_with_timezone::<
                             TimestampMicrosecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -2050,9 +2078,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampNanosecondType>()
                     .try_unary::<_, Time32SecondType, ArrowError>(|x| {
-                        Ok(time_to_time32s(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time32s(as_time_res_with_timezone::<
                             TimestampNanosecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -2062,9 +2092,11 @@ pub fn cast_with_options(
                 array
                     .as_primitive::<TimestampNanosecondType>()
                     .try_unary::<_, Time32MillisecondType, ArrowError>(|x| {
-                        Ok(time_to_time32ms(as_time_res_with_timezone::<
+                        Ok(civil_time_to_time32ms(as_time_res_with_timezone::<
                             TimestampNanosecondType,
-                        >(x, tz)?))
+                        >(
+                            x, tz.as_ref()
+                        )?))
                     })?,
             ))
         }
@@ -2277,9 +2309,12 @@ fn adjust_timestamp_to_timezone<T: ArrowTimestampType>(
     cast_options: &CastOptions,
 ) -> Result<PrimitiveArray<Int64Type>, ArrowError> {
     let adjust = |o| {
-        let local = as_datetime::<T>(o)?;
-        let offset = to_tz.offset_from_local_datetime(&local).single()?;
-        T::make_value(local - offset.fix())
+        let local = as_civil_datetime::<T>(o)?;
+        let offset = to_tz.single_offset_from_local(&local)?;
+        let utc = local
+            .checked_sub_offset(offset)
+            .expect("`NaiveDateTime - FixedOffset` out of range");
+        T::make_value_civil(utc)
     };
     let adjusted = if cast_options.safe {
         array.unary_opt::<_, Int64Type>(adjust)
@@ -2502,7 +2537,6 @@ where
 mod tests {
     use super::*;
     use arrow_buffer::{Buffer, IntervalDayTime, NullBuffer};
-    use chrono::NaiveDate;
     use half::f16;
 
     macro_rules! generate_cast_test_case {
@@ -4366,11 +4400,11 @@ mod tests {
             let result = cast_with_options(&array, &to_type, &options).unwrap();
             let c = result.as_primitive::<Date32Type>();
             assert_eq!(
-                chrono::NaiveDate::from_ymd_opt(2020, 12, 25),
+                jiff::civil::Date::new(2020, 12, 25).ok(),
                 c.value_as_date(0)
             );
             assert_eq!(
-                chrono::NaiveDate::from_ymd_opt(2020, 11, 17),
+                jiff::civil::Date::new(2020, 11, 17).ok(),
                 c.value_as_date(1)
             );
         }
@@ -4924,11 +4958,11 @@ mod tests {
         let dates = cast(timestamps.as_ref(), &DataType::Date32).unwrap();
 
         let c = dates.as_primitive::<Date32Type>();
-        let expected = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        let expected = jiff::civil::date(1970, 1, 1);
         assert_eq!(c.value_as_date(0).unwrap(), expected);
         assert_eq!(c.value_as_date(1).unwrap(), expected);
         assert!(c.is_null(2));
-        let expected = NaiveDate::from_ymd_opt(2020, 2, 29).unwrap();
+        let expected = jiff::civil::date(2020, 2, 29);
         assert_eq!(c.value_as_date(3).unwrap(), expected);
     }
     #[test]
@@ -9148,11 +9182,10 @@ mod tests {
 
             let tz = tz.as_ref().parse().unwrap();
 
-            let as_tz =
-                |v: i64| as_datetime_with_timezone::<TimestampNanosecondType>(v, tz).unwrap();
+            let as_tz = |v: i64| as_zoned_datetime::<TimestampNanosecondType>(v, &tz).unwrap();
 
-            let as_utc = |v: &i64| as_tz(*v).naive_utc().to_string();
-            let as_local = |v: &i64| as_tz(*v).naive_local().to_string();
+            let as_utc = |v: &i64| as_tz(*v).utc.to_string();
+            let as_local = |v: &i64| as_tz(*v).local().to_string();
 
             let values = b.as_primitive::<TimestampNanosecondType>().values();
             let utc_results: Vec<_> = values.iter().map(as_utc).collect();

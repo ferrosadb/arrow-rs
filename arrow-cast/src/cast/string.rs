@@ -133,7 +133,7 @@ pub(crate) fn cast_string_to_timestamp<O: OffsetSizeTrait, T: ArrowTimestampType
             let tz: Tz = tz.as_ref().parse()?;
             cast_string_to_timestamp_impl(array.iter(), &tz, cast_options)?
         }
-        None => cast_string_to_timestamp_impl(array.iter(), &Utc, cast_options)?,
+        None => cast_string_to_timestamp_impl(array.iter(), &Tz::UTC, cast_options)?,
     };
     Ok(Arc::new(out.with_timezone_opt(to_tz.clone())))
 }
@@ -150,17 +150,12 @@ pub(crate) fn cast_view_to_timestamp<T: ArrowTimestampType>(
             let tz: Tz = tz.as_ref().parse()?;
             cast_string_to_timestamp_impl(array.iter(), &tz, cast_options)?
         }
-        None => cast_string_to_timestamp_impl(array.iter(), &Utc, cast_options)?,
+        None => cast_string_to_timestamp_impl(array.iter(), &Tz::UTC, cast_options)?,
     };
     Ok(Arc::new(out.with_timezone_opt(to_tz.clone())))
 }
 
-fn cast_string_to_timestamp_impl<
-    'a,
-    I: Iterator<Item = Option<&'a str>>,
-    T: ArrowTimestampType,
-    Tz: TimeZone,
->(
+fn cast_string_to_timestamp_impl<'a, I: Iterator<Item = Option<&'a str>>, T: ArrowTimestampType>(
     iter: I,
     tz: &Tz,
     cast_options: &CastOptions,
@@ -168,8 +163,8 @@ fn cast_string_to_timestamp_impl<
     if cast_options.safe {
         let iter = iter.map(|v| {
             v.and_then(|v| {
-                let naive = string_to_datetime(tz, v).ok()?.naive_utc();
-                T::make_value(naive)
+                let naive = string_to_zoned_datetime(tz, v).ok()?.utc;
+                T::make_value_civil(naive)
             })
         });
         // Benefit:
@@ -182,8 +177,8 @@ fn cast_string_to_timestamp_impl<
         let vec = iter
             .map(|v| {
                 v.map(|v| {
-                    let naive = string_to_datetime(tz, v)?.naive_utc();
-                    T::make_value(naive).ok_or_else(|| match T::UNIT {
+                    let naive = string_to_zoned_datetime(tz, v)?.utc;
+                    T::make_value_civil(naive).ok_or_else(|| match T::UNIT {
                         TimeUnit::Nanosecond => ArrowError::CastError(format!(
                             "Overflow converting {naive} to Nanosecond. The dates that can be represented as nanoseconds have to be between 1677-09-21T00:12:44.0 and 2262-04-11T23:47:16.854775804"
                         )),
