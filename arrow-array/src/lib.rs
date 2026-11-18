@@ -242,6 +242,7 @@ mod scalar;
 pub use scalar::*;
 
 pub mod builder;
+pub mod calendar;
 pub mod cast;
 mod delta;
 #[cfg(feature = "ffi")]
