@@ -93,4 +93,8 @@ arrow-select = { version = "53.4.1", path = "./arrow-select" }
 arrow-string = { version = "53.4.1", path = "./arrow-string" }
 parquet = { version = "53.4.1", path = "./parquet", default-features = false }
 
+# Only a dev-dependency of the arrow crates (an oracle in tests); parquet
+# and arrow-avro still depend on it directly.
 chrono = { version = ">= 0.4.34, < 0.4.40", default-features = false, features = ["clock"] }
+
+jiff = { version = "0.2.46", default-features = false, features = ["std"] }

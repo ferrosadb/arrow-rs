@@ -17,10 +17,12 @@
 
 //! Zero-sized types used to parameterize generic array implementations
 
+use crate::calendar::{CivilDate, CivilDateTime};
 use crate::delta::{
-    add_days_datetime, add_months_datetime, shift_months, sub_days_datetime, sub_months_datetime,
+    add_days_zoned, add_months_zoned, add_signed_days, date64_days, nanos_days, shift_months,
+    sub_days_zoned, sub_months_zoned,
 };
-use crate::temporal_conversions::as_datetime_with_timezone;
+use crate::temporal_conversions::as_zoned_datetime;
 use crate::timezone::Tz;
 use crate::{ArrowNativeTypeOp, OffsetSizeTrait};
 use arrow_buffer::{i256, Buffer, OffsetBuffer};
@@ -33,11 +35,9 @@ use arrow_schema::{
     ArrowError, DataType, IntervalUnit, TimeUnit, DECIMAL128_MAX_PRECISION, DECIMAL128_MAX_SCALE,
     DECIMAL256_MAX_PRECISION, DECIMAL256_MAX_SCALE, DECIMAL_DEFAULT_SCALE,
 };
-use chrono::{Duration, NaiveDate, NaiveDateTime};
 use half::f16;
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::ops::{Add, Sub};
 
 // re-export types so that they can be used without importing arrow_buffer explicitly
 pub use arrow_buffer::{IntervalDayTime, IntervalMonthDayNano};
@@ -330,123 +330,118 @@ pub trait ArrowTimestampType: ArrowTemporalType<Native = i64> {
         Self::UNIT
     }
 
-    /// Creates a ArrowTimestampType::Native from the provided [`NaiveDateTime`]
+    /// Creates a ArrowTimestampType::Native from the provided [`jiff::civil::DateTime`]
     ///
     /// See [`DataType::Timestamp`] for more information on timezone handling
-    fn make_value(naive: NaiveDateTime) -> Option<i64>;
-}
+    fn make_value(naive: jiff::civil::DateTime) -> Option<i64>;
 
-impl ArrowTimestampType for TimestampSecondType {
-    const UNIT: TimeUnit = TimeUnit::Second;
-
-    fn make_value(naive: NaiveDateTime) -> Option<i64> {
-        Some(naive.and_utc().timestamp())
+    /// Creates a ArrowTimestampType::Native from the provided [`CivilDateTime`],
+    /// interpreted as UTC. Returns `None` on overflow.
+    fn make_value_civil(naive: CivilDateTime) -> Option<i64> {
+        make_timestamp_value(Self::UNIT, naive)
     }
 }
-impl ArrowTimestampType for TimestampMillisecondType {
-    const UNIT: TimeUnit = TimeUnit::Millisecond;
 
-    fn make_value(naive: NaiveDateTime) -> Option<i64> {
-        let utc = naive.and_utc();
-        let millis = utc.timestamp().checked_mul(1_000)?;
-        millis.checked_add(utc.timestamp_subsec_millis() as i64)
+/// Converts a UTC datetime to a timestamp in `unit`, `None` on overflow
+///
+/// Any leap second fraction is included in the sub-second part.
+fn make_timestamp_value(unit: TimeUnit, naive: CivilDateTime) -> Option<i64> {
+    let secs = naive.timestamp();
+    let nanos = naive.time.nanosecond() as i64;
+    match unit {
+        TimeUnit::Second => Some(secs),
+        TimeUnit::Millisecond => secs.checked_mul(1_000)?.checked_add(nanos / 1_000_000),
+        TimeUnit::Microsecond => secs.checked_mul(1_000_000)?.checked_add(nanos / 1_000),
+        TimeUnit::Nanosecond => secs.checked_mul(1_000_000_000)?.checked_add(nanos),
     }
 }
-impl ArrowTimestampType for TimestampMicrosecondType {
-    const UNIT: TimeUnit = TimeUnit::Microsecond;
 
-    fn make_value(naive: NaiveDateTime) -> Option<i64> {
-        let utc = naive.and_utc();
-        let micros = utc.timestamp().checked_mul(1_000_000)?;
-        micros.checked_add(utc.timestamp_subsec_micros() as i64)
-    }
-}
-impl ArrowTimestampType for TimestampNanosecondType {
-    const UNIT: TimeUnit = TimeUnit::Nanosecond;
+macro_rules! timestamp_type {
+    ($t:ty, $unit:expr) => {
+        impl ArrowTimestampType for $t {
+            const UNIT: TimeUnit = $unit;
 
-    fn make_value(naive: NaiveDateTime) -> Option<i64> {
-        let utc = naive.and_utc();
-        let nanos = utc.timestamp().checked_mul(1_000_000_000)?;
-        nanos.checked_add(utc.timestamp_subsec_nanos() as i64)
-    }
+            fn make_value(naive: jiff::civil::DateTime) -> Option<i64> {
+                make_timestamp_value(Self::UNIT, naive.into())
+            }
+        }
+    };
 }
+timestamp_type!(TimestampSecondType, TimeUnit::Second);
+timestamp_type!(TimestampMillisecondType, TimeUnit::Millisecond);
+timestamp_type!(TimestampMicrosecondType, TimeUnit::Microsecond);
+timestamp_type!(TimestampNanosecondType, TimeUnit::Nanosecond);
 
 fn add_year_months<T: ArrowTimestampType>(
     timestamp: <T as ArrowPrimitiveType>::Native,
     delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-    tz: Tz,
+    tz: &Tz,
 ) -> Option<<T as ArrowPrimitiveType>::Native> {
     let months = IntervalYearMonthType::to_months(delta);
-    let res = as_datetime_with_timezone::<T>(timestamp, tz)?;
-    let res = add_months_datetime(res, months)?;
-    let res = res.naive_utc();
-    T::make_value(res)
+    let res = as_zoned_datetime::<T>(timestamp, tz)?;
+    let res = add_months_zoned(res, months, tz)?;
+    T::make_value_civil(res.utc)
 }
 
 fn add_day_time<T: ArrowTimestampType>(
     timestamp: <T as ArrowPrimitiveType>::Native,
     delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-    tz: Tz,
+    tz: &Tz,
 ) -> Option<<T as ArrowPrimitiveType>::Native> {
     let (days, ms) = IntervalDayTimeType::to_parts(delta);
-    let res = as_datetime_with_timezone::<T>(timestamp, tz)?;
-    let res = add_days_datetime(res, days)?;
-    let res = res.checked_add_signed(Duration::try_milliseconds(ms as i64)?)?;
-    let res = res.naive_utc();
-    T::make_value(res)
+    let res = as_zoned_datetime::<T>(timestamp, tz)?;
+    let res = add_days_zoned(res, days, tz)?;
+    let res = res.utc.checked_add_nanos(ms as i128 * 1_000_000)?;
+    T::make_value_civil(res)
 }
 
 fn add_month_day_nano<T: ArrowTimestampType>(
     timestamp: <T as ArrowPrimitiveType>::Native,
     delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-    tz: Tz,
+    tz: &Tz,
 ) -> Option<<T as ArrowPrimitiveType>::Native> {
     let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(delta);
-    let res = as_datetime_with_timezone::<T>(timestamp, tz)?;
-    let res = add_months_datetime(res, months)?;
-    let res = add_days_datetime(res, days)?;
-    let res = res.checked_add_signed(Duration::nanoseconds(nanos))?;
-    let res = res.naive_utc();
-    T::make_value(res)
+    let res = as_zoned_datetime::<T>(timestamp, tz)?;
+    let res = add_months_zoned(res, months, tz)?;
+    let res = add_days_zoned(res, days, tz)?;
+    let res = res.utc.checked_add_nanos(nanos as i128)?;
+    T::make_value_civil(res)
 }
 
 fn subtract_year_months<T: ArrowTimestampType>(
     timestamp: <T as ArrowPrimitiveType>::Native,
     delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-    tz: Tz,
+    tz: &Tz,
 ) -> Option<<T as ArrowPrimitiveType>::Native> {
     let months = IntervalYearMonthType::to_months(delta);
-    let res = as_datetime_with_timezone::<T>(timestamp, tz)?;
-    let res = sub_months_datetime(res, months)?;
-    let res = res.naive_utc();
-    T::make_value(res)
+    let res = as_zoned_datetime::<T>(timestamp, tz)?;
+    let res = sub_months_zoned(res, months, tz)?;
+    T::make_value_civil(res.utc)
 }
 
 fn subtract_day_time<T: ArrowTimestampType>(
     timestamp: <T as ArrowPrimitiveType>::Native,
     delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-    tz: Tz,
+    tz: &Tz,
 ) -> Option<<T as ArrowPrimitiveType>::Native> {
     let (days, ms) = IntervalDayTimeType::to_parts(delta);
-    let res = as_datetime_with_timezone::<T>(timestamp, tz)?;
-    let res = sub_days_datetime(res, days)?;
-    let res = res.checked_sub_signed(Duration::try_milliseconds(ms as i64)?)?;
-    let res = res.naive_utc();
-    T::make_value(res)
+    let res = as_zoned_datetime::<T>(timestamp, tz)?;
+    let res = sub_days_zoned(res, days, tz)?;
+    let res = res.utc.checked_add_nanos(-(ms as i128 * 1_000_000))?;
+    T::make_value_civil(res)
 }
 
 fn subtract_month_day_nano<T: ArrowTimestampType>(
     timestamp: <T as ArrowPrimitiveType>::Native,
     delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-    tz: Tz,
+    tz: &Tz,
 ) -> Option<<T as ArrowPrimitiveType>::Native> {
     let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(delta);
-    let res = as_datetime_with_timezone::<T>(timestamp, tz)?;
-    let res = sub_months_datetime(res, months)?;
-    let res = sub_days_datetime(res, days)?;
-    let res = res.checked_sub_signed(Duration::nanoseconds(nanos))?;
-    let res = res.naive_utc();
-    T::make_value(res)
+    let res = as_zoned_datetime::<T>(timestamp, tz)?;
+    let res = sub_months_zoned(res, months, tz)?;
+    let res = sub_days_zoned(res, days, tz)?;
+    let res = res.utc.checked_add_nanos(-(nanos as i128))?;
+    T::make_value_civil(res)
 }
 
 impl TimestampSecondType {
@@ -462,7 +457,7 @@ impl TimestampSecondType {
     pub fn add_year_months(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_year_months::<Self>(timestamp, delta, tz)
     }
@@ -479,7 +474,7 @@ impl TimestampSecondType {
     pub fn add_day_time(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_day_time::<Self>(timestamp, delta, tz)
     }
@@ -495,7 +490,7 @@ impl TimestampSecondType {
     pub fn add_month_day_nano(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_month_day_nano::<Self>(timestamp, delta, tz)
     }
@@ -512,7 +507,7 @@ impl TimestampSecondType {
     pub fn subtract_year_months(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_year_months::<Self>(timestamp, delta, tz)
     }
@@ -529,7 +524,7 @@ impl TimestampSecondType {
     pub fn subtract_day_time(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_day_time::<Self>(timestamp, delta, tz)
     }
@@ -546,7 +541,7 @@ impl TimestampSecondType {
     pub fn subtract_month_day_nano(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_month_day_nano::<Self>(timestamp, delta, tz)
     }
@@ -563,7 +558,7 @@ impl TimestampMicrosecondType {
     pub fn add_year_months(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_year_months::<Self>(timestamp, delta, tz)
     }
@@ -578,7 +573,7 @@ impl TimestampMicrosecondType {
     pub fn add_day_time(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_day_time::<Self>(timestamp, delta, tz)
     }
@@ -593,7 +588,7 @@ impl TimestampMicrosecondType {
     pub fn add_month_day_nano(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_month_day_nano::<Self>(timestamp, delta, tz)
     }
@@ -608,7 +603,7 @@ impl TimestampMicrosecondType {
     pub fn subtract_year_months(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_year_months::<Self>(timestamp, delta, tz)
     }
@@ -623,7 +618,7 @@ impl TimestampMicrosecondType {
     pub fn subtract_day_time(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_day_time::<Self>(timestamp, delta, tz)
     }
@@ -638,7 +633,7 @@ impl TimestampMicrosecondType {
     pub fn subtract_month_day_nano(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_month_day_nano::<Self>(timestamp, delta, tz)
     }
@@ -655,7 +650,7 @@ impl TimestampMillisecondType {
     pub fn add_year_months(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_year_months::<Self>(timestamp, delta, tz)
     }
@@ -670,7 +665,7 @@ impl TimestampMillisecondType {
     pub fn add_day_time(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_day_time::<Self>(timestamp, delta, tz)
     }
@@ -685,7 +680,7 @@ impl TimestampMillisecondType {
     pub fn add_month_day_nano(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_month_day_nano::<Self>(timestamp, delta, tz)
     }
@@ -700,7 +695,7 @@ impl TimestampMillisecondType {
     pub fn subtract_year_months(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_year_months::<Self>(timestamp, delta, tz)
     }
@@ -715,7 +710,7 @@ impl TimestampMillisecondType {
     pub fn subtract_day_time(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_day_time::<Self>(timestamp, delta, tz)
     }
@@ -730,7 +725,7 @@ impl TimestampMillisecondType {
     pub fn subtract_month_day_nano(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_month_day_nano::<Self>(timestamp, delta, tz)
     }
@@ -747,7 +742,7 @@ impl TimestampNanosecondType {
     pub fn add_year_months(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_year_months::<Self>(timestamp, delta, tz)
     }
@@ -762,7 +757,7 @@ impl TimestampNanosecondType {
     pub fn add_day_time(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_day_time::<Self>(timestamp, delta, tz)
     }
@@ -777,7 +772,7 @@ impl TimestampNanosecondType {
     pub fn add_month_day_nano(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         add_month_day_nano::<Self>(timestamp, delta, tz)
     }
@@ -792,7 +787,7 @@ impl TimestampNanosecondType {
     pub fn subtract_year_months(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_year_months::<Self>(timestamp, delta, tz)
     }
@@ -807,7 +802,7 @@ impl TimestampNanosecondType {
     pub fn subtract_day_time(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_day_time::<Self>(timestamp, delta, tz)
     }
@@ -822,7 +817,7 @@ impl TimestampNanosecondType {
     pub fn subtract_month_day_nano(
         timestamp: <Self as ArrowPrimitiveType>::Native,
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
-        tz: Tz,
+        tz: &Tz,
     ) -> Option<<Self as ArrowPrimitiveType>::Native> {
         subtract_month_day_nano::<Self>(timestamp, delta, tz)
     }
@@ -907,25 +902,49 @@ impl IntervalMonthDayNanoType {
     }
 }
 
+fn to_jiff_date(date: CivilDate, value: i64, ty: &str) -> jiff::civil::Date {
+    match date.to_jiff() {
+        Some(d) => d,
+        None => panic!("{ty} value {value} ({date:?}) is outside the range of jiff::civil::Date"),
+    }
+}
+
 impl Date32Type {
-    /// Converts an arrow Date32Type into a chrono::NaiveDate
+    /// Converts an arrow Date32Type into a [`jiff::civil::Date`]
     ///
     /// # Arguments
     ///
     /// * `i` - The Date32Type to convert
-    pub fn to_naive_date(i: <Date32Type as ArrowPrimitiveType>::Native) -> NaiveDate {
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        epoch.add(Duration::try_days(i as i64).unwrap())
+    ///
+    /// # Panics
+    ///
+    /// If the date lies outside the years -9999 to 9999 supported by `jiff`.
+    /// See [`Self::to_civil_date`] for the full range.
+    pub fn to_naive_date(i: <Date32Type as ArrowPrimitiveType>::Native) -> jiff::civil::Date {
+        to_jiff_date(Self::to_civil_date(i), i as i64, "Date32")
     }
 
-    /// Converts a chrono::NaiveDate into an arrow Date32Type
+    /// Converts a [`jiff::civil::Date`] into an arrow Date32Type
     ///
     /// # Arguments
     ///
-    /// * `d` - The NaiveDate to convert
-    pub fn from_naive_date(d: NaiveDate) -> <Date32Type as ArrowPrimitiveType>::Native {
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        d.sub(epoch).num_days() as <Date32Type as ArrowPrimitiveType>::Native
+    /// * `d` - The date to convert
+    pub fn from_naive_date(d: jiff::civil::Date) -> <Date32Type as ArrowPrimitiveType>::Native {
+        Self::from_civil_date(d.into())
+    }
+
+    /// Converts an arrow Date32Type into a [`CivilDate`]
+    ///
+    /// # Panics
+    ///
+    /// If the date is out of range
+    pub fn to_civil_date(i: <Date32Type as ArrowPrimitiveType>::Native) -> CivilDate {
+        add_signed_days(CivilDate::UNIX_EPOCH, i as i64, "+")
+    }
+
+    /// Converts a [`CivilDate`] into an arrow Date32Type
+    pub fn from_civil_date(d: CivilDate) -> <Date32Type as ArrowPrimitiveType>::Native {
+        d.unix_days() as <Date32Type as ArrowPrimitiveType>::Native
     }
 
     /// Adds the given IntervalYearMonthType to an arrow Date32Type
@@ -938,10 +957,10 @@ impl Date32Type {
         date: <Date32Type as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
-        let prior = Date32Type::to_naive_date(date);
+        let prior = Date32Type::to_civil_date(date);
         let months = IntervalYearMonthType::to_months(delta);
         let posterior = shift_months(prior, months);
-        Date32Type::from_naive_date(posterior)
+        Date32Type::from_civil_date(posterior)
     }
 
     /// Adds the given IntervalDayTimeType to an arrow Date32Type
@@ -955,10 +974,10 @@ impl Date32Type {
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
         let (days, ms) = IntervalDayTimeType::to_parts(delta);
-        let res = Date32Type::to_naive_date(date);
-        let res = res.add(Duration::try_days(days as i64).unwrap());
-        let res = res.add(Duration::try_milliseconds(ms as i64).unwrap());
-        Date32Type::from_naive_date(res)
+        let res = Date32Type::to_civil_date(date);
+        let res = add_signed_days(res, days as i64, "+");
+        let res = add_signed_days(res, date64_days(ms as i64), "+");
+        Date32Type::from_civil_date(res)
     }
 
     /// Adds the given IntervalMonthDayNanoType to an arrow Date32Type
@@ -972,11 +991,11 @@ impl Date32Type {
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
         let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(delta);
-        let res = Date32Type::to_naive_date(date);
+        let res = Date32Type::to_civil_date(date);
         let res = shift_months(res, months);
-        let res = res.add(Duration::try_days(days as i64).unwrap());
-        let res = res.add(Duration::nanoseconds(nanos));
-        Date32Type::from_naive_date(res)
+        let res = add_signed_days(res, days as i64, "+");
+        let res = add_signed_days(res, nanos_days(nanos), "+");
+        Date32Type::from_civil_date(res)
     }
 
     /// Subtract the given IntervalYearMonthType to an arrow Date32Type
@@ -989,10 +1008,10 @@ impl Date32Type {
         date: <Date32Type as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
-        let prior = Date32Type::to_naive_date(date);
+        let prior = Date32Type::to_civil_date(date);
         let months = IntervalYearMonthType::to_months(-delta);
         let posterior = shift_months(prior, months);
-        Date32Type::from_naive_date(posterior)
+        Date32Type::from_civil_date(posterior)
     }
 
     /// Subtract the given IntervalDayTimeType to an arrow Date32Type
@@ -1006,10 +1025,10 @@ impl Date32Type {
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
         let (days, ms) = IntervalDayTimeType::to_parts(delta);
-        let res = Date32Type::to_naive_date(date);
-        let res = res.sub(Duration::try_days(days as i64).unwrap());
-        let res = res.sub(Duration::try_milliseconds(ms as i64).unwrap());
-        Date32Type::from_naive_date(res)
+        let res = Date32Type::to_civil_date(date);
+        let res = add_signed_days(res, days as i64, "-");
+        let res = add_signed_days(res, date64_days(ms as i64), "-");
+        Date32Type::from_civil_date(res)
     }
 
     /// Subtract the given IntervalMonthDayNanoType to an arrow Date32Type
@@ -1023,33 +1042,55 @@ impl Date32Type {
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
     ) -> <Date32Type as ArrowPrimitiveType>::Native {
         let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(delta);
-        let res = Date32Type::to_naive_date(date);
+        let res = Date32Type::to_civil_date(date);
         let res = shift_months(res, -months);
-        let res = res.sub(Duration::try_days(days as i64).unwrap());
-        let res = res.sub(Duration::nanoseconds(nanos));
-        Date32Type::from_naive_date(res)
+        let res = add_signed_days(res, days as i64, "-");
+        let res = add_signed_days(res, nanos_days(nanos), "-");
+        Date32Type::from_civil_date(res)
     }
 }
 
 impl Date64Type {
-    /// Converts an arrow Date64Type into a chrono::NaiveDate
+    /// Converts an arrow Date64Type into a [`jiff::civil::Date`]
+    ///
+    /// Milliseconds are truncated toward zero to whole days.
     ///
     /// # Arguments
     ///
     /// * `i` - The Date64Type to convert
-    pub fn to_naive_date(i: <Date64Type as ArrowPrimitiveType>::Native) -> NaiveDate {
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        epoch.add(Duration::try_milliseconds(i).unwrap())
+    ///
+    /// # Panics
+    ///
+    /// If the date lies outside the years -9999 to 9999 supported by `jiff`.
+    /// See [`Self::to_civil_date`] for the full range.
+    pub fn to_naive_date(i: <Date64Type as ArrowPrimitiveType>::Native) -> jiff::civil::Date {
+        to_jiff_date(Self::to_civil_date(i), i, "Date64")
     }
 
-    /// Converts a chrono::NaiveDate into an arrow Date64Type
+    /// Converts a [`jiff::civil::Date`] into an arrow Date64Type
     ///
     /// # Arguments
     ///
-    /// * `d` - The NaiveDate to convert
-    pub fn from_naive_date(d: NaiveDate) -> <Date64Type as ArrowPrimitiveType>::Native {
-        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        d.sub(epoch).num_milliseconds() as <Date64Type as ArrowPrimitiveType>::Native
+    /// * `d` - The date to convert
+    pub fn from_naive_date(d: jiff::civil::Date) -> <Date64Type as ArrowPrimitiveType>::Native {
+        Self::from_civil_date(d.into())
+    }
+
+    /// Converts an arrow Date64Type into a [`CivilDate`]
+    ///
+    /// Milliseconds are truncated toward zero to whole days.
+    ///
+    /// # Panics
+    ///
+    /// If `i == i64::MIN` or the date is out of range
+    pub fn to_civil_date(i: <Date64Type as ArrowPrimitiveType>::Native) -> CivilDate {
+        assert_ne!(i, i64::MIN, "Date64 value i64::MIN is not a valid duration");
+        add_signed_days(CivilDate::UNIX_EPOCH, date64_days(i), "+")
+    }
+
+    /// Converts a [`CivilDate`] into an arrow Date64Type
+    pub fn from_civil_date(d: CivilDate) -> <Date64Type as ArrowPrimitiveType>::Native {
+        d.unix_days() * 86_400_000
     }
 
     /// Adds the given IntervalYearMonthType to an arrow Date64Type
@@ -1062,10 +1103,10 @@ impl Date64Type {
         date: <Date64Type as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
     ) -> <Date64Type as ArrowPrimitiveType>::Native {
-        let prior = Date64Type::to_naive_date(date);
+        let prior = Date64Type::to_civil_date(date);
         let months = IntervalYearMonthType::to_months(delta);
         let posterior = shift_months(prior, months);
-        Date64Type::from_naive_date(posterior)
+        Date64Type::from_civil_date(posterior)
     }
 
     /// Adds the given IntervalDayTimeType to an arrow Date64Type
@@ -1079,10 +1120,10 @@ impl Date64Type {
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
     ) -> <Date64Type as ArrowPrimitiveType>::Native {
         let (days, ms) = IntervalDayTimeType::to_parts(delta);
-        let res = Date64Type::to_naive_date(date);
-        let res = res.add(Duration::try_days(days as i64).unwrap());
-        let res = res.add(Duration::try_milliseconds(ms as i64).unwrap());
-        Date64Type::from_naive_date(res)
+        let res = Date64Type::to_civil_date(date);
+        let res = add_signed_days(res, days as i64, "+");
+        let res = add_signed_days(res, date64_days(ms as i64), "+");
+        Date64Type::from_civil_date(res)
     }
 
     /// Adds the given IntervalMonthDayNanoType to an arrow Date64Type
@@ -1096,11 +1137,11 @@ impl Date64Type {
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
     ) -> <Date64Type as ArrowPrimitiveType>::Native {
         let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(delta);
-        let res = Date64Type::to_naive_date(date);
+        let res = Date64Type::to_civil_date(date);
         let res = shift_months(res, months);
-        let res = res.add(Duration::try_days(days as i64).unwrap());
-        let res = res.add(Duration::nanoseconds(nanos));
-        Date64Type::from_naive_date(res)
+        let res = add_signed_days(res, days as i64, "+");
+        let res = add_signed_days(res, nanos_days(nanos), "+");
+        Date64Type::from_civil_date(res)
     }
 
     /// Subtract the given IntervalYearMonthType to an arrow Date64Type
@@ -1113,10 +1154,10 @@ impl Date64Type {
         date: <Date64Type as ArrowPrimitiveType>::Native,
         delta: <IntervalYearMonthType as ArrowPrimitiveType>::Native,
     ) -> <Date64Type as ArrowPrimitiveType>::Native {
-        let prior = Date64Type::to_naive_date(date);
+        let prior = Date64Type::to_civil_date(date);
         let months = IntervalYearMonthType::to_months(-delta);
         let posterior = shift_months(prior, months);
-        Date64Type::from_naive_date(posterior)
+        Date64Type::from_civil_date(posterior)
     }
 
     /// Subtract the given IntervalDayTimeType to an arrow Date64Type
@@ -1130,10 +1171,10 @@ impl Date64Type {
         delta: <IntervalDayTimeType as ArrowPrimitiveType>::Native,
     ) -> <Date64Type as ArrowPrimitiveType>::Native {
         let (days, ms) = IntervalDayTimeType::to_parts(delta);
-        let res = Date64Type::to_naive_date(date);
-        let res = res.sub(Duration::try_days(days as i64).unwrap());
-        let res = res.sub(Duration::try_milliseconds(ms as i64).unwrap());
-        Date64Type::from_naive_date(res)
+        let res = Date64Type::to_civil_date(date);
+        let res = add_signed_days(res, days as i64, "-");
+        let res = add_signed_days(res, date64_days(ms as i64), "-");
+        Date64Type::from_civil_date(res)
     }
 
     /// Subtract the given IntervalMonthDayNanoType to an arrow Date64Type
@@ -1147,11 +1188,11 @@ impl Date64Type {
         delta: <IntervalMonthDayNanoType as ArrowPrimitiveType>::Native,
     ) -> <Date64Type as ArrowPrimitiveType>::Native {
         let (months, days, nanos) = IntervalMonthDayNanoType::to_parts(delta);
-        let res = Date64Type::to_naive_date(date);
+        let res = Date64Type::to_civil_date(date);
         let res = shift_months(res, -months);
-        let res = res.sub(Duration::try_days(days as i64).unwrap());
-        let res = res.sub(Duration::nanoseconds(nanos));
-        Date64Type::from_naive_date(res)
+        let res = add_signed_days(res, days as i64, "-");
+        let res = add_signed_days(res, nanos_days(nanos), "-");
+        Date64Type::from_civil_date(res)
     }
 }
 

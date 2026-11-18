@@ -44,8 +44,7 @@ ahash = { version = "0.8", default-features = false, features = ["runtime-rng"] 
 arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-data = { workspace = true }
-chrono = { workspace = true }
-chrono-tz = { version = "0.10", optional = true }
+jiff = { workspace = true }
 num = { version = "0.4.1", default-features = false, features = ["std"] }
 half = { version = "2.1", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.15.1", default-features = false }
@@ -53,11 +52,15 @@ hashbrown = { version = "0.15.1", default-features = false }
 [features]
 ffi = ["arrow-schema/ffi", "arrow-data/ffi"]
 force_validate = []
+# IANA time zone support, via jiff's bundled time zone database. Named after
+# the chrono-tz crate it used to enable so dependents keep resolving it.
+chrono-tz = ["jiff/tzdb-bundle-always"]
 
 [dev-dependencies]
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 criterion = { version = "0.5", default-features = false }
 chrono = { workspace = true }
+chrono-tz = { version = "0.10" }
 
 [build-dependencies]
 

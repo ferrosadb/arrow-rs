@@ -30,6 +30,7 @@
 //! This module is public so the other arrow crates can share it; it is not
 //! intended as a general purpose date library.
 
+mod convert;
 mod date;
 pub mod format;
 pub mod parse;

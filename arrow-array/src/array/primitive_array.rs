@@ -17,9 +17,11 @@
 
 use crate::array::print_long_array;
 use crate::builder::{BooleanBufferBuilder, BufferBuilder, PrimitiveBuilder};
+use crate::calendar::format::Rfc3339;
 use crate::iterator::PrimitiveIter;
 use crate::temporal_conversions::{
-    as_date, as_datetime, as_datetime_with_timezone, as_duration, as_time,
+    as_civil_date, as_civil_datetime, as_civil_time, as_date, as_datetime,
+    as_datetime_with_timezone, as_duration, as_time, as_zoned_datetime,
 };
 use crate::timezone::Tz;
 use crate::trusted_len::trusted_len_unzip;
@@ -29,7 +31,6 @@ use arrow_buffer::{i256, ArrowNativeType, Buffer, NullBuffer, ScalarBuffer};
 use arrow_data::bit_iterator::try_for_each_valid_idx;
 use arrow_data::{ArrayData, ArrayDataBuilder};
 use arrow_schema::{ArrowError, DataType};
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use half::f16;
 use std::any::Any;
 use std::sync::Arc;
@@ -253,7 +254,7 @@ pub type Float64Array = PrimitiveArray<Float64Type>;
 
 /// A [`PrimitiveArray`] of seconds since UNIX epoch stored as `i64`
 ///
-/// This type is similar to the [`chrono::DateTime`] type and can hold
+/// This type is similar to the [`jiff::Zoned`] type and can hold
 /// values such as `1970-05-09 14:25:11 +01:00`
 ///
 /// See also [`Timestamp`](arrow_schema::DataType::Timestamp).
@@ -268,7 +269,7 @@ pub type Float64Array = PrimitiveArray<Float64Type>;
 /// let arr = TimestampSecondArray::from(vec![Some(11111111)]);
 /// let utc_tz: Tz = "+00:00".parse().unwrap();
 ///
-/// assert_eq!(arr.value_as_datetime_with_tz(0, utc_tz).map(|v| v.to_string()).unwrap(), "1970-05-09 14:25:11 +00:00")
+/// assert_eq!(arr.value_as_datetime_with_tz(0, utc_tz).map(|v| v.to_string()).unwrap(), "1970-05-09T14:25:11+00:00[UTC]")
 /// ```
 ///
 /// # Example: UTC timestamps pre epoch
@@ -281,7 +282,7 @@ pub type Float64Array = PrimitiveArray<Float64Type>;
 /// let arr = TimestampSecondArray::from(vec![Some(-11111111)]);
 /// let utc_tz: Tz = "+00:00".parse().unwrap();
 ///
-/// assert_eq!(arr.value_as_datetime_with_tz(0, utc_tz).map(|v| v.to_string()).unwrap(), "1969-08-25 09:34:49 +00:00")
+/// assert_eq!(arr.value_as_datetime_with_tz(0, utc_tz).map(|v| v.to_string()).unwrap(), "1969-08-25T09:34:49+00:00[UTC]")
 /// ```
 ///
 /// # Example: With timezone specified
@@ -294,7 +295,7 @@ pub type Float64Array = PrimitiveArray<Float64Type>;
 /// let arr = TimestampSecondArray::from(vec![Some(11111111)]).with_timezone("+10:00".to_string());
 /// let sydney_tz: Tz = "+10:00".parse().unwrap();
 ///
-/// assert_eq!(arr.value_as_datetime_with_tz(0, sydney_tz).map(|v| v.to_string()).unwrap(), "1970-05-10 00:25:11 +10:00")
+/// assert_eq!(arr.value_as_datetime_with_tz(0, sydney_tz).map(|v| v.to_string()).unwrap(), "1970-05-10T00:25:11+10:00[+10:00]")
 /// ```
 ///
 /// See [`PrimitiveArray`] for more information and examples
@@ -317,37 +318,37 @@ pub type TimestampNanosecondArray = PrimitiveArray<TimestampNanosecondType>;
 
 /// A [`PrimitiveArray`] of days since UNIX epoch stored as `i32`
 ///
-/// This type is similar to the [`chrono::NaiveDate`] type and can hold
+/// This type is similar to the [`jiff::civil::Date`] type and can hold
 /// values such as `2018-11-13`
 pub type Date32Array = PrimitiveArray<Date32Type>;
 
 /// A [`PrimitiveArray`] of milliseconds since UNIX epoch stored as `i64`
 ///
-/// This type is similar to the [`chrono::NaiveDate`] type and can hold
+/// This type is similar to the [`jiff::civil::Date`] type and can hold
 /// values such as `2018-11-13`
 pub type Date64Array = PrimitiveArray<Date64Type>;
 
 /// A [`PrimitiveArray`] of seconds since midnight stored as `i32`
 ///
-/// This type is similar to the [`chrono::NaiveTime`] type and can
+/// This type is similar to the [`jiff::civil::Time`] type and can
 /// hold values such as `00:02:00`
 pub type Time32SecondArray = PrimitiveArray<Time32SecondType>;
 
 /// A [`PrimitiveArray`] of milliseconds since midnight stored as `i32`
 ///
-/// This type is similar to the [`chrono::NaiveTime`] type and can
+/// This type is similar to the [`jiff::civil::Time`] type and can
 /// hold values such as `00:02:00.123`
 pub type Time32MillisecondArray = PrimitiveArray<Time32MillisecondType>;
 
 /// A [`PrimitiveArray`] of microseconds since midnight stored as `i64`
 ///
-/// This type is similar to the [`chrono::NaiveTime`] type and can
+/// This type is similar to the [`jiff::civil::Time`] type and can
 /// hold values such as `00:02:00.123456`
 pub type Time64MicrosecondArray = PrimitiveArray<Time64MicrosecondType>;
 
 /// A [`PrimitiveArray`] of nanoseconds since midnight stored as `i64`
 ///
-/// This type is similar to the [`chrono::NaiveTime`] type and can
+/// This type is similar to the [`jiff::civil::Time`] type and can
 /// hold values such as `00:02:00.123456789`
 pub type Time64NanosecondArray = PrimitiveArray<Time64NanosecondType>;
 
@@ -1201,40 +1202,41 @@ impl<T: ArrowTemporalType> PrimitiveArray<T>
 where
     i64: From<T::Native>,
 {
-    /// Returns value as a chrono `NaiveDateTime`, handling time resolution
+    /// Returns value as a [`jiff::civil::DateTime`], handling time resolution
     ///
-    /// If a data type cannot be converted to `NaiveDateTime`, a `None` is returned.
+    /// If a data type cannot be converted to a datetime, or the value lies
+    /// outside the years -9999 to 9999 supported by `jiff`, `None` is returned.
     /// A valid value is expected, thus the user should first check for validity.
-    pub fn value_as_datetime(&self, i: usize) -> Option<NaiveDateTime> {
+    pub fn value_as_datetime(&self, i: usize) -> Option<jiff::civil::DateTime> {
         as_datetime::<T>(i64::from(self.value(i)))
     }
 
-    /// Returns value as a chrono `NaiveDateTime`, handling time resolution with the provided tz
+    /// Returns value as a [`jiff::Zoned`], handling time resolution with the provided tz
     ///
     /// functionally it is same as `value_as_datetime`, however it adds
-    /// the passed tz to the to-be-returned NaiveDateTime
-    pub fn value_as_datetime_with_tz(&self, i: usize, tz: Tz) -> Option<DateTime<Tz>> {
+    /// the passed tz to the to-be-returned datetime
+    pub fn value_as_datetime_with_tz(&self, i: usize, tz: Tz) -> Option<jiff::Zoned> {
         as_datetime_with_timezone::<T>(i64::from(self.value(i)), tz)
     }
 
-    /// Returns value as a chrono `NaiveDate` by using `Self::datetime()`
+    /// Returns value as a [`jiff::civil::Date`] by using `Self::datetime()`
     ///
-    /// If a data type cannot be converted to `NaiveDate`, a `None` is returned
-    pub fn value_as_date(&self, i: usize) -> Option<NaiveDate> {
-        self.value_as_datetime(i).map(|datetime| datetime.date())
+    /// If a data type cannot be converted to a date, a `None` is returned
+    pub fn value_as_date(&self, i: usize) -> Option<jiff::civil::Date> {
+        as_date::<T>(i64::from(self.value(i)))
     }
 
-    /// Returns a value as a chrono `NaiveTime`
+    /// Returns a value as a [`jiff::civil::Time`]
     ///
     /// `Date32` and `Date64` return UTC midnight as they do not have time resolution
-    pub fn value_as_time(&self, i: usize) -> Option<NaiveTime> {
+    pub fn value_as_time(&self, i: usize) -> Option<jiff::civil::Time> {
         as_time::<T>(i64::from(self.value(i)))
     }
 
-    /// Returns a value as a chrono `Duration`
+    /// Returns a value as a [`jiff::SignedDuration`]
     ///
-    /// If a data type cannot be converted to `Duration`, a `None` is returned
-    pub fn value_as_duration(&self, i: usize) -> Option<Duration> {
+    /// If a data type cannot be converted to a duration, a `None` is returned
+    pub fn value_as_duration(&self, i: usize) -> Option<jiff::SignedDuration> {
         as_duration::<T>(i64::from(self.value(i)))
     }
 }
@@ -1247,7 +1249,7 @@ impl<T: ArrowPrimitiveType> std::fmt::Debug for PrimitiveArray<T> {
         print_long_array(self, f, |array, index, f| match data_type {
             DataType::Date32 | DataType::Date64 => {
                 let v = self.value(index).to_i64().unwrap();
-                match as_date::<T>(v) {
+                match as_civil_date::<T>(v) {
                     Some(date) => write!(f, "{date:?}"),
                     None => {
                         write!(
@@ -1259,7 +1261,7 @@ impl<T: ArrowPrimitiveType> std::fmt::Debug for PrimitiveArray<T> {
             }
             DataType::Time32(_) | DataType::Time64(_) => {
                 let v = self.value(index).to_i64().unwrap();
-                match as_time::<T>(v) {
+                match as_civil_time::<T>(v) {
                     Some(time) => write!(f, "{time:?}"),
                     None => {
                         write!(
@@ -1276,12 +1278,23 @@ impl<T: ArrowPrimitiveType> std::fmt::Debug for PrimitiveArray<T> {
                     Some(tz_string) => {
                         match tz_string.parse::<Tz>() {
                             // if the time zone is valid, construct a DateTime<Tz> and format it as rfc3339
-                            Ok(tz) => match as_datetime_with_timezone::<T>(v, tz) {
-                                Some(datetime) => write!(f, "{}", datetime.to_rfc3339()),
+                            Ok(tz) => match as_zoned_datetime::<T>(v, &tz) {
+                                Some(zoned) => {
+                                    let (local, offset) = (zoned.local(), zoned.offset);
+                                    write!(
+                                        f,
+                                        "{}",
+                                        Rfc3339 {
+                                            local,
+                                            offset,
+                                            use_z: false
+                                        }
+                                    )
+                                }
                                 None => write!(f, "null"),
                             },
-                            // if the time zone is invalid, shows NaiveDateTime with an error message
-                            Err(_) => match as_datetime::<T>(v) {
+                            // if the time zone is invalid, shows the naive datetime with an error message
+                            Err(_) => match as_civil_datetime::<T>(v) {
                                 Some(datetime) => {
                                     write!(f, "{datetime:?} (Unknown Time Zone '{tz_string}')")
                                 }
@@ -1290,7 +1303,7 @@ impl<T: ArrowPrimitiveType> std::fmt::Debug for PrimitiveArray<T> {
                         }
                     }
                     // for Timestamp without TimeZone
-                    None => match as_datetime::<T>(v) {
+                    None => match as_civil_datetime::<T>(v) {
                         Some(datetime) => write!(f, "{datetime:?}"),
                         None => write!(f, "null"),
                     },
@@ -1706,8 +1719,10 @@ mod tests {
                     1550902545147,
                     arr.value_as_datetime(i)
                         .unwrap()
-                        .and_utc()
-                        .timestamp_millis()
+                        .to_zoned(jiff::tz::TimeZone::UTC)
+                        .unwrap()
+                        .timestamp()
+                        .as_millisecond()
                 );
             } else {
                 assert!(arr.is_null(i));
@@ -1731,7 +1746,14 @@ mod tests {
             assert_eq!(None, arr.value_as_datetime(i));
             assert_eq!(None, arr.value_as_date(i));
             let time = arr.value_as_time(i).unwrap();
-            assert_eq!(*formatted, time.format("%H:%M:%S%.3f").to_string());
+            assert_eq!(
+                *formatted,
+                crate::calendar::format::DelayedFormat::new(
+                    crate::calendar::format::FormatInput::time(time.into()),
+                    "%H:%M:%S%.3f"
+                )
+                .to_string()
+            );
         }
     }
 
@@ -1755,7 +1777,14 @@ mod tests {
             assert_eq!(None, arr.value_as_datetime(i));
             assert_eq!(None, arr.value_as_date(i));
             let time = arr.value_as_time(i).unwrap();
-            assert_eq!(*item, time.format("%H:%M:%S%.3f").to_string());
+            assert_eq!(
+                *item,
+                crate::calendar::format::DelayedFormat::new(
+                    crate::calendar::format::FormatInput::time(time.into()),
+                    "%H:%M:%S%.3f"
+                )
+                .to_string()
+            );
         }
     }
 
