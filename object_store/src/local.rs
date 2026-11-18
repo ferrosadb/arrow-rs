@@ -26,9 +26,9 @@ use std::{collections::VecDeque, path::PathBuf};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt};
 use futures::{FutureExt, TryStreamExt};
+use jiff::Timestamp;
 use parking_lot::Mutex;
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use url::Url;
@@ -48,6 +48,12 @@ pub(crate) enum Error {
     #[snafu(display("File size for {} did not fit in a usize: {}", path, source))]
     FileSizeOverflowedUsize {
         source: std::num::TryFromIntError,
+        path: String,
+    },
+
+    #[snafu(display("Modification time of {} is out of range: {}", path, source))]
+    ModifiedTimeOutOfRange {
+        source: jiff::Error,
         path: String,
     },
 
@@ -957,11 +963,15 @@ fn convert_entry(entry: DirEntry, location: Path) -> Result<Option<ObjectMeta>> 
     }
 }
 
-fn last_modified(metadata: &Metadata) -> DateTime<Utc> {
-    metadata
+fn last_modified(metadata: &Metadata, location: &Path) -> Result<Timestamp> {
+    let modified = metadata
         .modified()
-        .expect("Modified file time should be supported on this platform")
-        .into()
+        .expect("Modified file time should be supported on this platform");
+    // jiff covers years -9999..=9999; chrono covered a wider range
+    let modified = Timestamp::try_from(modified).context(ModifiedTimeOutOfRangeSnafu {
+        path: location.as_ref(),
+    })?;
+    Ok(modified)
 }
 
 fn get_etag(metadata: &Metadata) -> String {
@@ -981,7 +991,7 @@ fn get_etag(metadata: &Metadata) -> String {
 }
 
 fn convert_metadata(metadata: Metadata, location: Path) -> Result<ObjectMeta> {
-    let last_modified = last_modified(&metadata);
+    let last_modified = last_modified(&metadata, &location)?;
     let size = usize::try_from(metadata.len()).context(FileSizeOverflowedUsizeSnafu {
         path: location.as_ref(),
     })?;

@@ -18,7 +18,7 @@ use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
 use std::time::Duration;
 
-use humantime::{format_duration, parse_duration};
+use crate::duration::{format_duration, parse_duration};
 use reqwest::header::HeaderValue;
 
 use crate::{Error, Result};

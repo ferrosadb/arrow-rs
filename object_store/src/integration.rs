@@ -526,7 +526,7 @@ pub async fn get_opts(storage: &dyn ObjectStore) {
     }
 
     let options = GetOptions {
-        if_unmodified_since: Some(meta.last_modified + chrono::Duration::try_hours(10).unwrap()),
+        if_unmodified_since: Some(meta.last_modified + jiff::SignedDuration::from_hours(10)),
         ..GetOptions::default()
     };
     match storage.get_opts(&path, options).await {
@@ -535,7 +535,7 @@ pub async fn get_opts(storage: &dyn ObjectStore) {
     }
 
     let options = GetOptions {
-        if_unmodified_since: Some(meta.last_modified - chrono::Duration::try_hours(10).unwrap()),
+        if_unmodified_since: Some(meta.last_modified - jiff::SignedDuration::from_hours(10)),
         ..GetOptions::default()
     };
     match storage.get_opts(&path, options).await {
@@ -553,7 +553,7 @@ pub async fn get_opts(storage: &dyn ObjectStore) {
     }
 
     let options = GetOptions {
-        if_modified_since: Some(meta.last_modified - chrono::Duration::try_hours(10).unwrap()),
+        if_modified_since: Some(meta.last_modified - jiff::SignedDuration::from_hours(10)),
         ..GetOptions::default()
     };
     match storage.get_opts(&path, options).await {

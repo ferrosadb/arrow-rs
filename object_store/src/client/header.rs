@@ -19,7 +19,6 @@
 
 use crate::path::Path;
 use crate::ObjectMeta;
-use chrono::{DateTime, TimeZone, Utc};
 use hyper::header::{CONTENT_LENGTH, ETAG, LAST_MODIFIED};
 use hyper::HeaderMap;
 use snafu::{OptionExt, ResultExt, Snafu};
@@ -61,7 +60,7 @@ pub(crate) enum Error {
     #[snafu(display("Invalid last modified '{}': {}", last_modified, source))]
     InvalidLastModified {
         last_modified: String,
-        source: chrono::ParseError,
+        source: crate::date::DateParseError,
     },
 
     #[snafu(display("Invalid content length '{}': {}", content_length, source))]
@@ -106,12 +105,11 @@ pub(crate) fn header_meta(
     let last_modified = match headers.get(LAST_MODIFIED) {
         Some(last_modified) => {
             let last_modified = last_modified.to_str().context(BadHeaderSnafu)?;
-            DateTime::parse_from_rfc2822(last_modified)
+            crate::date::parse_rfc2822(last_modified)
                 .context(InvalidLastModifiedSnafu { last_modified })?
-                .with_timezone(&Utc)
         }
         None if cfg.last_modified_required => return Err(Error::MissingLastModified),
-        None => Utc.timestamp_nanos(0),
+        None => jiff::Timestamp::UNIX_EPOCH,
     };
 
     let e_tag = match get_etag(headers) {

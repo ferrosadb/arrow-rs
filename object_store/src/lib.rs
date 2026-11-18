@@ -534,6 +534,10 @@ pub use client::{
 #[cfg(feature = "cloud")]
 mod config;
 
+mod date;
+#[cfg(feature = "cloud")]
+mod duration;
+
 mod tags;
 
 pub use tags::TagSet;
@@ -561,8 +565,8 @@ use crate::path::Path;
 use crate::util::maybe_spawn_blocking;
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use futures::{stream::BoxStream, StreamExt, TryStreamExt};
+use jiff::Timestamp;
 use snafu::Snafu;
 use std::fmt::{Debug, Formatter};
 #[cfg(not(target_arch = "wasm32"))]
@@ -900,7 +904,7 @@ pub struct ObjectMeta {
     /// The full path to the object
     pub location: Path,
     /// The last modified time
-    pub last_modified: DateTime<Utc>,
+    pub last_modified: Timestamp,
     /// The size in bytes of the object
     pub size: usize,
     /// The unique identifier for the object
@@ -943,7 +947,7 @@ pub struct GetOptions {
     /// Request will succeed if the object has been modified since
     ///
     /// <https://datatracker.ietf.org/doc/html/rfc9110#section-13.1.3>
-    pub if_modified_since: Option<DateTime<Utc>>,
+    pub if_modified_since: Option<Timestamp>,
     /// Request will succeed if the object has not been modified since
     /// otherwise returning [`Error::Precondition`]
     ///
@@ -951,7 +955,7 @@ pub struct GetOptions {
     /// timestamp matches, instead of for any timestamp greater than or equal.
     ///
     /// <https://datatracker.ietf.org/doc/html/rfc9110#section-13.1.4>
-    pub if_unmodified_since: Option<DateTime<Utc>>,
+    pub if_unmodified_since: Option<Timestamp>,
     /// Request transfer of only the specified range of bytes
     /// otherwise returning [`Error::NotModified`]
     ///
@@ -985,7 +989,12 @@ impl GetOptions {
             if last_modified > date {
                 return Err(Error::Precondition {
                     path: meta.location.to_string(),
-                    source: format!("{date} < {last_modified}").into(),
+                    source: format!(
+                        "{} < {}",
+                        crate::date::chrono_display(date),
+                        crate::date::chrono_display(last_modified)
+                    )
+                    .into(),
                 });
             }
         }
@@ -1001,7 +1010,12 @@ impl GetOptions {
             if last_modified <= date {
                 return Err(Error::NotModified {
                     path: meta.location.to_string(),
-                    source: format!("{date} >= {last_modified}").into(),
+                    source: format!(
+                        "{} >= {}",
+                        crate::date::chrono_display(date),
+                        crate::date::chrono_display(last_modified)
+                    )
+                    .into(),
                 });
             }
         }
@@ -1351,7 +1365,6 @@ impl From<Error> for std::io::Error {
 mod tests {
     use super::*;
     use crate::buffered::BufWriter;
-    use chrono::TimeZone;
     use tokio::io::AsyncWriteExt;
 
     macro_rules! maybe_skip_integration {
@@ -1485,7 +1498,7 @@ mod tests {
     fn test_preconditions() {
         let mut meta = ObjectMeta {
             location: Path::from("test"),
-            last_modified: Utc.timestamp_nanos(100),
+            last_modified: Timestamp::from_nanosecond(100).unwrap(),
             size: 100,
             e_tag: Some("123".to_string()),
             version: None,
@@ -1494,24 +1507,24 @@ mod tests {
         let mut options = GetOptions::default();
         options.check_preconditions(&meta).unwrap();
 
-        options.if_modified_since = Some(Utc.timestamp_nanos(50));
+        options.if_modified_since = Some(Timestamp::from_nanosecond(50).unwrap());
         options.check_preconditions(&meta).unwrap();
 
-        options.if_modified_since = Some(Utc.timestamp_nanos(100));
+        options.if_modified_since = Some(Timestamp::from_nanosecond(100).unwrap());
         options.check_preconditions(&meta).unwrap_err();
 
-        options.if_modified_since = Some(Utc.timestamp_nanos(101));
+        options.if_modified_since = Some(Timestamp::from_nanosecond(101).unwrap());
         options.check_preconditions(&meta).unwrap_err();
 
         options = GetOptions::default();
 
-        options.if_unmodified_since = Some(Utc.timestamp_nanos(50));
+        options.if_unmodified_since = Some(Timestamp::from_nanosecond(50).unwrap());
         options.check_preconditions(&meta).unwrap_err();
 
-        options.if_unmodified_since = Some(Utc.timestamp_nanos(100));
+        options.if_unmodified_since = Some(Timestamp::from_nanosecond(100).unwrap());
         options.check_preconditions(&meta).unwrap();
 
-        options.if_unmodified_since = Some(Utc.timestamp_nanos(101));
+        options.if_unmodified_since = Some(Timestamp::from_nanosecond(101).unwrap());
         options.check_preconditions(&meta).unwrap();
 
         options = GetOptions::default();
@@ -1532,7 +1545,7 @@ mod tests {
         options.check_preconditions(&meta).unwrap();
 
         // If-Match takes precedence
-        options.if_unmodified_since = Some(Utc.timestamp_nanos(200));
+        options.if_unmodified_since = Some(Timestamp::from_nanosecond(200).unwrap());
         options.check_preconditions(&meta).unwrap();
 
         options = GetOptions::default();
@@ -1550,7 +1563,7 @@ mod tests {
         options.check_preconditions(&meta).unwrap_err();
 
         // If-None-Match takes precedence
-        options.if_modified_since = Some(Utc.timestamp_nanos(10));
+        options.if_modified_since = Some(Timestamp::from_nanosecond(10).unwrap());
         options.check_preconditions(&meta).unwrap_err();
 
         // Check missing ETag

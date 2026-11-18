@@ -32,10 +32,9 @@ all-features = true
 [dependencies] # In alphabetical order
 async-trait = "0.1.53"
 bytes = "1.0"
-chrono = { version = "0.4.34", default-features = false, features = ["clock"] }
 futures = "0.3"
-humantime = "2.1"
 itertools = "0.13.0"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 parking_lot = { version = "0.12" }
 percent-encoding = "2.1"
 snafu = { version = "0.8", default-features = false, features = ["std", "rust_1_61"] }
@@ -61,8 +60,9 @@ httparse = { version = "1.8.0", default-features = false, features = ["std"], op
 nix = { version = "0.29.0", features = ["fs"] }
 
 [features]
-cloud = ["serde", "serde_json", "quick-xml", "hyper", "reqwest", "reqwest/json", "reqwest/stream", "chrono/serde", "base64", "rand", "ring"]
-azure = ["cloud", "httparse"]
+cloud = ["serde", "serde_json", "quick-xml", "hyper", "reqwest", "reqwest/json", "reqwest/stream", "base64", "rand", "ring"]
+# The Azure CLI credential interprets `expiresOn` in the system time zone.
+azure = ["cloud", "httparse", "jiff/tz-system", "jiff/tzdb-zoneinfo", "jiff/tzdb-bundle-platform", "jiff/tzdb-concatenated"]
 gcp = ["cloud", "rustls-pemfile"]
 aws = ["cloud", "md-5"]
 http = ["cloud"]
@@ -70,6 +70,10 @@ tls-webpki-roots = ["reqwest?/rustls-tls-webpki-roots"]
 integration = []
 
 [dev-dependencies] # In alphabetical order
+# chrono and humantime are test oracles only: the date and duration code
+# reproduces the behaviour of the exact versions object_store 0.11.2 shipped with.
+chrono = { version = "=0.4.39", default-features = false, features = ["std", "alloc"] }
+humantime = "=2.3.0"
 futures-test = "0.3"
 hyper = { version = "1.2", features = ["server"] }
 hyper-util = "0.1"

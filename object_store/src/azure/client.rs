@@ -34,8 +34,8 @@ use async_trait::async_trait;
 use base64::prelude::{BASE64_STANDARD, BASE64_STANDARD_NO_PAD};
 use base64::Engine;
 use bytes::{Buf, Bytes};
-use chrono::{DateTime, Utc};
 use hyper::http::HeaderName;
+use jiff::Timestamp;
 use rand::Rng as _;
 use reqwest::{
     header::{HeaderMap, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE, IF_MATCH, IF_NONE_MATCH},
@@ -749,14 +749,14 @@ impl AzureClient {
     /// <https://docs.microsoft.com/en-us/rest/api/storageservices/get-user-delegation-key>
     async fn get_user_delegation_key(
         &self,
-        start: &DateTime<Utc>,
-        end: &DateTime<Utc>,
+        start: &Timestamp,
+        end: &Timestamp,
     ) -> Result<UserDelegationKey> {
         let credential = self.get_credential().await?;
         let url = self.config.service.clone();
 
-        let start = start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let expiry = end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let start = crate::date::rfc3339_secs(*start);
+        let expiry = crate::date::rfc3339_secs(*end);
 
         let mut body = String::new();
         body.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<KeyInfo>\n");
@@ -797,8 +797,17 @@ impl AzureClient {
     /// Since delegation keys are acquired ad-hoc, the signer aloows for signing multiple urls with the same key.
     pub(crate) async fn signer(&self, expires_in: Duration) -> Result<AzureSigner> {
         let credential = self.get_credential().await?;
-        let signed_start = chrono::Utc::now();
-        let signed_expiry = signed_start + expires_in;
+        let signed_start = Timestamp::now();
+        let signed_expiry =
+            crate::date::checked_add_std(signed_start, expires_in).ok_or_else(|| {
+                crate::Error::Generic {
+                    store: STORE,
+                    source: format!(
+                        "SAS expiry {expires_in:?} after {signed_start} is out of range"
+                    )
+                    .into(),
+                }
+            })?;
         match credential.as_deref() {
             Some(AzureCredential::BearerToken(_)) => {
                 let key = self
@@ -1065,7 +1074,7 @@ impl TryFrom<Blob> for ObjectMeta {
 #[serde(rename_all = "PascalCase")]
 struct BlobProperties {
     #[serde(deserialize_with = "deserialize_rfc1123", rename = "Last-Modified")]
-    pub last_modified: DateTime<Utc>,
+    pub last_modified: Timestamp,
     #[serde(rename = "Content-Length")]
     pub content_length: u64,
     #[serde(rename = "Content-Type")]

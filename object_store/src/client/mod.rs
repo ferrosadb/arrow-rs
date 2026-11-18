@@ -702,13 +702,14 @@ impl GetOptionsExt for RequestBuilder {
             self = self.header(IF_NONE_MATCH, tag);
         }
 
-        const DATE_FORMAT: &str = "%a, %d %b %Y %H:%M:%S GMT";
         if let Some(date) = options.if_unmodified_since {
-            self = self.header(IF_UNMODIFIED_SINCE, date.format(DATE_FORMAT).to_string());
+            let date = crate::date::http_date(date).to_string();
+            self = self.header(IF_UNMODIFIED_SINCE, date);
         }
 
         if let Some(date) = options.if_modified_since {
-            self = self.header(IF_MODIFIED_SINCE, date.format(DATE_FORMAT).to_string());
+            let date = crate::date::http_date(date).to_string();
+            self = self.header(IF_MODIFIED_SINCE, date);
         }
 
         self

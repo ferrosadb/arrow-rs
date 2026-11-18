@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
+use jiff::Timestamp;
 use reqwest::{Response, StatusCode};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize, Serializer};
@@ -263,7 +263,13 @@ impl DynamoCommit {
             }
         };
 
-        let ttl = (Utc::now() + self.ttl).timestamp();
+        let now = Timestamp::now();
+        let ttl = crate::date::checked_add_std(now, self.ttl)
+            .ok_or_else(|| Error::Generic {
+                store: STORE,
+                source: format!("lock ttl {:?} after {now} is out of range", self.ttl).into(),
+            })?
+            .as_second();
         let items = [
             ("path", AttributeValue::from(path)),
             ("etag", AttributeValue::from(etag.unwrap_or("*"))),

@@ -23,8 +23,8 @@ use crate::util::{hex_digest, hex_encode, hmac_sha256};
 use crate::{CredentialProvider, Result, RetryConfig};
 use async_trait::async_trait;
 use bytes::Buf;
-use chrono::{DateTime, Utc};
 use hyper::header::HeaderName;
+use jiff::Timestamp;
 use percent_encoding::utf8_percent_encode;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::{Client, Method, Request, RequestBuilder, StatusCode};
@@ -80,8 +80,8 @@ impl AwsCredential {
     /// Signs a string
     ///
     /// <https://docs.aws.amazon.com/general/latest/gr/sigv4-calculate-signature.html>
-    fn sign(&self, to_sign: &str, date: DateTime<Utc>, region: &str, service: &str) -> String {
-        let date_string = date.format("%Y%m%d").to_string();
+    fn sign(&self, to_sign: &str, date: Timestamp, region: &str, service: &str) -> String {
+        let date_string = crate::date::basic_date(date).to_string();
         let date_hmac = hmac_sha256(format!("AWS4{}", self.secret_key), date_string);
         let region_hmac = hmac_sha256(date_hmac, region);
         let service_hmac = hmac_sha256(region_hmac, service);
@@ -95,7 +95,7 @@ impl AwsCredential {
 /// [AWS SigV4]: https://docs.aws.amazon.com/general/latest/gr/sigv4-calculate-signature.html
 #[derive(Debug)]
 pub struct AwsAuthorizer<'a> {
-    date: Option<DateTime<Utc>>,
+    date: Option<Timestamp>,
     credential: &'a AwsCredential,
     service: &'a str,
     region: &'a str,
@@ -170,8 +170,8 @@ impl<'a> AwsAuthorizer<'a> {
         let host_val = HeaderValue::from_str(host).unwrap();
         request.headers_mut().insert("host", host_val);
 
-        let date = self.date.unwrap_or_else(Utc::now);
-        let date_str = date.format("%Y%m%dT%H%M%SZ").to_string();
+        let date = self.date.unwrap_or_else(Timestamp::now);
+        let date_str = crate::date::basic_datetime(date).to_string();
         let date_val = HeaderValue::from_str(&date_str).unwrap();
         request.headers_mut().insert(&DATE_HEADER, date_val);
 
@@ -233,7 +233,7 @@ impl<'a> AwsAuthorizer<'a> {
     }
 
     pub(crate) fn sign(&self, method: Method, url: &mut Url, expires_in: Duration) {
-        let date = self.date.unwrap_or_else(Utc::now);
+        let date = self.date.unwrap_or_else(Timestamp::now);
         let scope = self.scope(date);
 
         // https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
@@ -243,7 +243,7 @@ impl<'a> AwsAuthorizer<'a> {
                 "X-Amz-Credential",
                 &format!("{}/{}", self.credential.key_id, scope),
             )
-            .append_pair("X-Amz-Date", &date.format("%Y%m%dT%H%M%SZ").to_string())
+            .append_pair("X-Amz-Date", &crate::date::basic_datetime(date).to_string())
             .append_pair("X-Amz-Expires", &expires_in.as_secs().to_string())
             .append_pair("X-Amz-SignedHeaders", "host");
 
@@ -292,7 +292,7 @@ impl<'a> AwsAuthorizer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn string_to_sign(
         &self,
-        date: DateTime<Utc>,
+        date: Timestamp,
         scope: &str,
         request_method: &Method,
         url: &Url,
@@ -326,16 +326,16 @@ impl<'a> AwsAuthorizer<'a> {
         format!(
             "{}\n{}\n{}\n{}",
             ALGORITHM,
-            date.format("%Y%m%dT%H%M%SZ"),
+            crate::date::basic_datetime(date),
             scope,
             hashed_canonical_request
         )
     }
 
-    fn scope(&self, date: DateTime<Utc>) -> String {
+    fn scope(&self, date: Timestamp) -> String {
         format!(
             "{}/{}/{}/aws4_request",
-            date.format("%Y%m%d"),
+            crate::date::basic_date(date),
             self.region,
             self.service
         )
@@ -510,13 +510,20 @@ impl TokenProvider for WebIdentityProvider {
     }
 }
 
+/// Time remaining until `expiration`, or zero if it has passed
+fn expiry_ttl(expiration: Timestamp) -> Duration {
+    let remaining = expiration.duration_since(Timestamp::now());
+    Duration::try_from(remaining).unwrap_or_default()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct InstanceCredentials {
     access_key_id: String,
     secret_access_key: String,
     token: String,
-    expiration: DateTime<Utc>,
+    #[serde(deserialize_with = "crate::util::deserialize_rfc3339")]
+    expiration: Timestamp,
 }
 
 impl From<InstanceCredentials> for AwsCredential {
@@ -575,8 +582,7 @@ async fn instance_creds(
 
     let creds: InstanceCredentials = creds_request.send_retry(retry_config).await?.json().await?;
 
-    let now = Utc::now();
-    let ttl = (creds.expiration - now).to_std().unwrap_or_default();
+    let ttl = expiry_ttl(creds.expiration);
     Ok(TemporaryToken {
         token: Arc::new(creds.into()),
         expiry: Some(Instant::now() + ttl),
@@ -601,7 +607,8 @@ struct SessionCredentials {
     session_token: String,
     secret_access_key: String,
     access_key_id: String,
-    expiration: DateTime<Utc>,
+    #[serde(deserialize_with = "crate::util::deserialize_rfc3339")]
+    expiration: Timestamp,
 }
 
 impl From<SessionCredentials> for AwsCredential {
@@ -648,8 +655,7 @@ async fn web_identity(
         .map_err(|e| format!("Invalid AssumeRoleWithWebIdentity response: {e}"))?;
 
     let creds = resp.assume_role_with_web_identity_result.credentials;
-    let now = Utc::now();
-    let ttl = (creds.expiration - now).to_std().unwrap_or_default();
+    let ttl = expiry_ttl(creds.expiration);
 
     Ok(TemporaryToken {
         token: Arc::new(creds.into()),
@@ -691,8 +697,7 @@ async fn task_credential(
 ) -> Result<TemporaryToken<Arc<AwsCredential>>, StdError> {
     let creds: InstanceCredentials = client.get(url).send_retry(retry).await?.json().await?;
 
-    let now = Utc::now();
-    let ttl = (creds.expiration - now).to_std().unwrap_or_default();
+    let ttl = expiry_ttl(creds.expiration);
     Ok(TemporaryToken {
         token: Arc::new(creds.into()),
         expiry: Some(Instant::now() + ttl),
@@ -775,9 +780,7 @@ mod tests {
         // region = 'us-east-1'
         // endpoint = 'https://ec2.amazonaws.com'
         // request_parameters = ''
-        let date = DateTime::parse_from_rfc3339("2022-08-06T18:01:34Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let date = "2022-08-06T18:01:34Z".parse::<Timestamp>().unwrap();
 
         let mut request = client
             .request(Method::GET, "https://ec2.amazon.com/")
@@ -815,9 +818,7 @@ mod tests {
         // region = 'us-east-1'
         // endpoint = 'https://ec2.amazonaws.com'
         // request_parameters = ''
-        let date = DateTime::parse_from_rfc3339("2022-08-06T18:01:34Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let date = "2022-08-06T18:01:34Z".parse::<Timestamp>().unwrap();
 
         let mut request = client
             .request(Method::GET, "https://ec2.amazon.com/")
@@ -855,9 +856,7 @@ mod tests {
         // region = 'us-east-1'
         // endpoint = 'https://ec2.amazonaws.com'
         // request_parameters = ''
-        let date = DateTime::parse_from_rfc3339("2022-08-06T18:01:34Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let date = "2022-08-06T18:01:34Z".parse::<Timestamp>().unwrap();
 
         let mut request = client
             .request(Method::GET, "https://ec2.amazon.com/")
@@ -887,9 +886,7 @@ mod tests {
             token: None,
         };
 
-        let date = DateTime::parse_from_rfc3339("2013-05-24T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let date = "2013-05-24T00:00:00Z".parse::<Timestamp>().unwrap();
 
         let authorizer = AwsAuthorizer {
             date: Some(date),
@@ -928,9 +925,7 @@ mod tests {
             token: None,
         };
 
-        let date = DateTime::parse_from_rfc3339("2013-05-24T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let date = "2013-05-24T00:00:00Z".parse::<Timestamp>().unwrap();
 
         let authorizer = AwsAuthorizer {
             date: Some(date),
@@ -971,9 +966,7 @@ mod tests {
             token: None,
         };
 
-        let date = DateTime::parse_from_rfc3339("2022-08-09T13:05:25Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let date = "2022-08-09T13:05:25Z".parse::<Timestamp>().unwrap();
 
         let mut request = client
             .request(Method::GET, "http://localhost:9000/tsm-schemas")

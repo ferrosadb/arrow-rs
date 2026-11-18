@@ -26,21 +26,25 @@ use bytes::Bytes;
 use futures::{stream::StreamExt, Stream, TryStreamExt};
 use snafu::Snafu;
 
-#[cfg(any(feature = "azure", feature = "http"))]
-pub(crate) static RFC1123_FMT: &str = "%a, %d %h %Y %T GMT";
-
 // deserialize dates according to rfc1123
 #[cfg(any(feature = "azure", feature = "http"))]
-pub(crate) fn deserialize_rfc1123<'de, D>(
-    deserializer: D,
-) -> Result<chrono::DateTime<chrono::Utc>, D::Error>
+pub(crate) fn deserialize_rfc1123<'de, D>(deserializer: D) -> Result<jiff::Timestamp, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let s: String = serde::Deserialize::deserialize(deserializer)?;
-    let naive =
-        chrono::NaiveDateTime::parse_from_str(&s, RFC1123_FMT).map_err(serde::de::Error::custom)?;
-    Ok(chrono::TimeZone::from_utc_datetime(&chrono::Utc, &naive))
+    crate::date::parse_rfc1123(&s).map_err(serde::de::Error::custom)
+}
+
+/// Deserialize an RFC 3339 date, accepting the same relaxed forms as chrono's
+/// `Deserialize for DateTime<Utc>` did
+#[cfg(any(feature = "aws", feature = "gcp"))]
+pub(crate) fn deserialize_rfc3339<'de, D>(deserializer: D) -> Result<jiff::Timestamp, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: String = serde::Deserialize::deserialize(deserializer)?;
+    crate::date::parse_rfc3339(&s).map_err(serde::de::Error::custom)
 }
 
 #[cfg(any(feature = "aws", feature = "azure"))]
